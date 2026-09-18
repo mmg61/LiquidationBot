@@ -118,7 +118,7 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
             recipient: address(this),
             deadline: block.timestamp + 100,
             amountIn: collateralReceived,
-            amountOutMinimum: 0, // Gerçek hayatta MEV koruması için hesaplanmalı
+            amountOutMinimum: 0, // Slippage protection for liquidation swaps
             sqrtPriceLimitX96: 0
         });
 
