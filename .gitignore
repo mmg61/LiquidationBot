@@ -1,0 +1,13 @@
+# Node.js
+node_modules/
+dist/
+
+# Env Files (CRITICAL: NEVER UPLOAD PRIVATE KEYS)
+.env
+.env.*
+
+# Foundry / Solidity
+cache/
+out/
+broadcast/
+.DS_Store
