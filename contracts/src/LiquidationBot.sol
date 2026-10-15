@@ -5,6 +5,7 @@ import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
 import {IFlashLoanSimpleReceiver} from "@aave/core-v3/contracts/flashloan/interfaces/IFlashLoanSimpleReceiver.sol";
 import {IPoolAddressesProvider} from "@aave/core-v3/contracts/interfaces/IPoolAddressesProvider.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // Uniswap V3 Router Arayüzü (Teminatı satıp borcu kapatmak için)
 interface ISwapRouter {
@@ -23,6 +24,8 @@ interface ISwapRouter {
 }
 
 contract LiquidationBot is IFlashLoanSimpleReceiver {
+    using SafeERC20 for IERC20;
+
     IPoolAddressesProvider public immutable addressProvider;
     IPool public immutable pool;
     ISwapRouter public immutable swapRouter;
@@ -33,6 +36,7 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         address collateralAsset;
         address userToLiquidate;
         uint256 debtToCover;
+        uint24 poolFee;
     }
 
     modifier onlyOwner() {
@@ -47,22 +51,46 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         owner = msg.sender;
     }
 
+    // 1A. Geriye dönük uyumluluk: Varsayılan 500 (%0.05 Arbitrum ana havuzu) ile tasfiye tetikleme
     function triggerLiquidation(
-        address debtAsset, // Flaş kredi olarak alınacak token (Örn: USDC)
-        address collateralAsset, // Satın alınacak indirimli teminat (Örn: WETH)
-        address userToLiquidate, // Tasfiye edilecek kullanıcının adresi
-        uint256 debtToCover // Ödenecek borç miktarı
+        address debtAsset,
+        address collateralAsset,
+        address userToLiquidate,
+        uint256 debtToCover
     ) external onlyOwner {
+        _executeLiquidation(debtAsset, collateralAsset, userToLiquidate, debtToCover, 500);
+    }
+
+    // 1B. Dinamik havuz komisyonu (Örn: 500, 3000) belirterek tasfiye tetikleme
+    function triggerLiquidation(
+        address debtAsset,
+        address collateralAsset,
+        address userToLiquidate,
+        uint256 debtToCover,
+        uint24 poolFee
+    ) external onlyOwner {
+        _executeLiquidation(debtAsset, collateralAsset, userToLiquidate, debtToCover, poolFee == 0 ? 500 : poolFee);
+    }
+
+    // Flaş kredi talep eden ve kâr aktarımını yöneten ortak iç fonksiyon
+    function _executeLiquidation(
+        address debtAsset,
+        address collateralAsset,
+        address userToLiquidate,
+        uint256 debtToCover,
+        uint24 poolFee
+    ) internal {
         // Flash Loan talep ederken executeOperation'a iletmek için veriyi kodluyoruz
         bytes memory params = abi.encode(
             FlashData({
                 collateralAsset: collateralAsset,
                 userToLiquidate: userToLiquidate,
-                debtToCover: debtToCover
+                debtToCover: debtToCover,
+                poolFee: poolFee
             })
         );
 
-        // 1. Aave'den Flaş Kredi (Flash Loan) İsteği ve İşlemler
+        // Aave'den Flaş Kredi (Flash Loan) İsteği
         pool.flashLoanSimple(
             address(this), // Krediyi alan (bu sözleşme)
             debtAsset, // Kredi alınacak token
@@ -71,12 +99,11 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
             0 // Referral Code
         );
 
-        // --- YENİ GÜNCELLEME: KÂRI ANINDA CÜZDANA AKTARMA ---
-        // Üstteki flashLoanSimple satırı tamamlandığında, bot işlemleri yapmış ve Aave borcunu otomatik tahsil etmiştir.
-        // Sözleşmenin içinde kalan debtAsset (Örn: USDC) bizim net kârımızdır.
+        // --- KÂRI ANINDA CÜZDANA AKTARMA ---
+        // Flaş kredi geri ödendikten sonra sözleşmede kalan debtAsset net kârımızdır.
         uint256 profit = IERC20(debtAsset).balanceOf(address(this));
         if (profit > 0) {
-            IERC20(debtAsset).transfer(owner, profit); // Kârı anında Owner'a (MetaMask cüzdanınıza) gönderir!
+            IERC20(debtAsset).safeTransfer(owner, profit); // Kârı anında sözleşme sahibinin MetaMask cüzdanına aktarır.
         }
     }
 
@@ -102,7 +129,7 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
             asset,
             data.userToLiquidate,
             amount,
-            false // aToken olarak mı almak istiyoruz? Hayır, doğrudan underlying token istiyoruz.
+            false // aToken yerine doğrudan underlying token istiyoruz
         );
 
         // b) Elde edilen teminatı borsada sat (Uniswap V3)
@@ -114,11 +141,11 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
             tokenIn: data.collateralAsset,
             tokenOut: asset,
-            fee: 3000, // 0.3% havuz komisyon oranı (örnek)
+            fee: data.poolFee, // Dinamik havuz komisyon oranı (Örn: 500 veya 3000)
             recipient: address(this),
             deadline: block.timestamp + 100,
             amountIn: collateralReceived,
-            amountOutMinimum: 0, // Slippage protection for liquidation swaps
+            amountOutMinimum: 0,
             sqrtPriceLimitX96: 0
         });
 
@@ -130,7 +157,7 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
 
         IERC20(asset).approve(address(pool), totalDebt);
 
-        return true; // true dönersek Aave paramızı çeker ve işlemi onaylar.
+        return true; // true dönersek Aave paramızı çeker ve işlemi onaylar
     }
 
     // Aave V3 adresi sözleşmesi standart arayüz gereği
@@ -143,10 +170,13 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         return pool;
     }
 
-    // Kalan kârı sahibin cüzdanına çekmek için
+    // Kalan bakiyeleri sahibin cüzdanına çekmek için güvenlik fonksiyonu
     function withdraw(address token) external onlyOwner {
+        require(token != address(0), "Invalid token address");
         uint256 balance = IERC20(token).balanceOf(address(this));
-        IERC20(token).transfer(owner, balance);
+        if (balance > 0) {
+            IERC20(token).safeTransfer(owner, balance);
+        }
     }
 
     // Yanlışlıkla gönderilen ETH'leri çekmek için

@@ -6,6 +6,9 @@ dist/
 .env
 .env.*
 
+# Project Memory & Internal Context
+PROJECT_MEMORY.md
+
 # Foundry / Solidity
 cache/
 out/
