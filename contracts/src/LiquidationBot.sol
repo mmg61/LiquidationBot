@@ -123,7 +123,8 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         FlashData memory data = abi.decode(params, (FlashData));
 
         // a) Kredi alınan parayı kullanarak batık kullanıcının borcunu öde ve teminatı satın al
-        IERC20(asset).approve(address(pool), amount);
+        // forceApprove (SafeERC20): USDT gibi token'larda sıfır olmayan mevcut onay hatasını önler.
+        IERC20(asset).forceApprove(address(pool), amount);
         pool.liquidationCall(
             data.collateralAsset,
             asset,
@@ -136,7 +137,7 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         uint256 collateralReceived = IERC20(data.collateralAsset).balanceOf(address(this));
         require(collateralReceived > 0, "No collateral received");
 
-        IERC20(data.collateralAsset).approve(address(swapRouter), collateralReceived);
+        IERC20(data.collateralAsset).forceApprove(address(swapRouter), collateralReceived);
 
         ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
             tokenIn: data.collateralAsset,
@@ -152,10 +153,12 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         uint256 amountOut = swapRouter.exactInputSingle(swapParams);
 
         // c) Borcu geri öde (Miktar + Flaş Kredi Faizi)
+        // KÂRLILIK GARANTİSİ: Eğer takastan dönen miktar flaş kredi borcu + faizini karşılamıyorsa
+        // işlemi tamamen iptal et (Revert). Bu sayede anapara veya kredi zararı riski %0'dır.
         uint256 totalDebt = amount + premium;
         require(amountOut >= totalDebt, "Not profitable! Reverting...");
 
-        IERC20(asset).approve(address(pool), totalDebt);
+        IERC20(asset).forceApprove(address(pool), totalDebt);
 
         return true; // true dönersek Aave paramızı çeker ve işlemi onaylar
     }
