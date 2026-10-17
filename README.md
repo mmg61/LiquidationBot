@@ -17,11 +17,12 @@ Sistem iki ana bileşenin uyum içinde çalışmasıyla işler:
 Blokzincir üzerindeki verileri sürekli takip eden ve tetikleme kararını veren gözlemci motorudur:
 
 - Kalıcı Borçlu Radarı: Sistem daha önce borç almış kullanıcıları yerel veri tabanında saklar. Ayrıca ağdaki yeni borçlanma işlemlerini canlı olarak dinleyerek listeye otomatik olarak ekler.
-- Çift Kademeli Tarama:
-  - Kritik Radar: Sağlık Faktörü 1.12 seviyesinin altına inmiş riskli kullanıcılar her 2 saniyede bir kontrol edilir. Böylece pozisyon 1.0 seviyesinin altına düştüğü an vakit kaybetmeden işlem başlatılır.
-  - Genel Radar: Diğer tüm kayıtlı kullanıcılar düzenli aralıklarla kontrol edilir ve sağlık durumu bozulanlar anında kritik listeye taşınır.
+- Üç Kademeli Keskin Nişancı Taraması:
+  - Ultra-Kritik Radar: Sağlık Faktörü 1.045 seviyesinin altına inmiş (tasfiyeye çok yakın) kullanıcılar her 1 saniyede bir kontrol edilir.
+  - Kritik Radar: Sağlık Faktörü 1.045 ile 1.12 arasında olan riskli kullanıcılar her 3 saniyede bir kontrol edilir.
+  - Genel Radar: Diğer tüm kayıtlı kullanıcılar düzenli aralıklarla kontrol edilir ve sağlık durumu bozulanlar anında üst kademelere taşınır.
 - Toplu Sorgulama (Multicall3): Yüzlerce cüzdanın durumu tek tek sorgulanmak yerine tek bir istek paketi içinde blokzincirden okunur. Bu yaklaşım hem sorgu limitlerine takılmayı önler hem de hızı artırır.
-- Otomatik Kârlılık ve Çift Seçimi: Aave Fiyat Kâhini (Oracle) ve veri sağlayıcısı üzerinden borçlunun tüm borç ve teminatları değerlendirilir. En yüksek getiriyi sağlayacak borç-teminat eşleşmesi dinamik olarak belirlenir.
+- Otomatik Kârlılık, Çoklu Çift ve Kısmi Tasfiye Seçimi: Aave Fiyat Kâhini (Oracle) ve veri sağlayıcısı üzerinden borçlunun tüm borç ve teminatları değerlendirilir. En yüksek getiriyi sağlayacak aday borç-teminat eşleşmeleri ve kısmi tasfiye oranları dinamik olarak belirlenir.
 - Dinamik Kapatma Oranı: Aave kurallarına uygun olarak Sağlık Faktörü 0.95 altında ise borcun yüzde 100'ü, 0.95 ile 1.0 arasında ise yüzde 50'si kapatılacak şekilde tutar belirlenir.
 - Sıfır Riskli Ön Simülasyon: Gerçek işlem ağa iletilmeden önce simülasyon yapılır. Yeterli kâr bırakmayan veya başarısız olacak işlemler zincire gönderilmez; böylece gereksiz işlem ücreti harcanmaz.
 
@@ -39,9 +40,8 @@ Tasfiye adımını blokzincir üzerinde tek bir işlem içinde (atomik olarak) t
 
 - Sıfır Sermaye Gereksinimi: Flaş Kredi kullanımı sayesinde kullanıcı bakiyesine ihtiyaç duyulmadan büyük hacimli tasfiyeler gerçekleştirilebilir.
 - Sıfır Zarar Koruması: İşlem öncesi simülasyon ve sözleşme içi kontroller sayesinde kâr getirmeyecek hiçbir işlem ağda onaylanmaz ve zarar oluşmaz.
-- Çoklu Varlık Uyumluluğu:
-  - Borç Varlıkları: Native USDC, Bridged USDC.e, USDT
-  - Teminat Varlıkları: WETH, WBTC, ARB
+- Geniş Çoklu Varlık Uyumluluğu (11 Ana Aave Rezervi):
+  - Hem Borç Hem Teminat Olarak Desteklenen Varlıklar: Native USDC, Bridged USDC.e, USDT, DAI, WETH, WBTC, wstETH, weETH, ARB, LINK, AAVE
 - Hızlı Veri İletişimi: Multicall3 altyapısı sayesinde minimum gecikme ve düşük ağ masrafı ile çalışır.
 - Yüksek Güvenlik Standardı: Token transferlerinde ve harcama izinlerinde OpenZeppelin SafeERC20 standartları uygulanır.
 

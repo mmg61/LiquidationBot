@@ -55,52 +55,31 @@ const MIN_STRIKE_DEBT_USD = 25.0;
 // 3. Maksimum kabul edilebilir gas fiyatı tavanı (Arbitrum normalde 0.01 - 0.1 Gwei arasıdır; 5 Gwei üstü anormal ağ tıkanıklığında işlemi durdurur).
 const MAX_GAS_PRICE_GWEI = 5.0;
 
-// KRİTİK TAKİP EŞİĞİ (Keskin Nişancı Eşiği):
-// Sağlık Faktörü (HF) bu değerin altına inen borçlular "Kritik Radara" alınır ve her 2 saniyede bir Multicall ile tek seferde taranır.
+// 3 KADEMELİ RADAR EŞİKLERİ:
+// 1. Ultra-Kritik Eşik (HF < 1.045): Tasfiyeye %1-%4 kalmış hedefler -> HER 1 SANİYEDE BİR taranır.
+const ULTRA_CRITICAL_HF_THRESHOLD = 1.045;
+// 2. Kritik Takip Eşiği (1.045 <= HF <= 1.12): Yakın riskteki hedefler -> HER 3 SANİYEDE BİR taranır.
 const CRITICAL_HF_THRESHOLD = 1.12;
 
-// Desteklenen Borç Varlıkları (Kullanıcının Aave'den borçlandığı token'lar)
-const DEBT_ASSETS = [
-  {
-    name: 'USDC (Native)',
-    address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831' as `0x${string}`,
-    variableDebtToken: '0xf611aEb5013fD2c0511c9CD55c7dc5C1140741A6' as `0x${string}`,
-    decimals: 6
-  },
-  {
-    name: 'USDC.e (Bridged)',
-    address: '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8' as `0x${string}`,
-    variableDebtToken: '0xFCCf3cAbbe80101232d343252614b6A3eE81C989' as `0x${string}`,
-    decimals: 6
-  },
-  {
-    name: 'USDT',
-    address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9' as `0x${string}`,
-    variableDebtToken: '0xfb00AC187a8Eb5AFAE4eACE434F493Eb62672df7' as `0x${string}`,
-    decimals: 6
-  }
-];
+// Aave V3 Arbitrum Üzerindeki Tüm Ana Rezerv Varlıkları (Hem Borç Hem Teminat Olarak Taranır)
+interface ReserveAsset {
+  name: string;
+  address: `0x${string}`;
+  decimals: number;
+}
 
-// Desteklenen Teminat Varlıkları (Kullanıcının Aave'ye rehin koyduğu ve bizim indirimli alacağımız varlıklar)
-const COLLATERAL_ASSETS = [
-  {
-    name: 'WETH',
-    address: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1' as `0x${string}`,
-    aToken: '0xe50fA9b3c56FfB159cB0FCA61F5c9D750e8128c8' as `0x${string}`,
-    decimals: 18
-  },
-  {
-    name: 'WBTC',
-    address: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f' as `0x${string}`,
-    aToken: '0x078f358208685046a11C85e8ad32895DED33A249' as `0x${string}`,
-    decimals: 8
-  },
-  {
-    name: 'ARB',
-    address: '0x912CE59144191C1204E64559FE8253a0e49E6548' as `0x${string}`,
-    aToken: '0x6533afac2E7BCCB20dca161449A13A32D391fb00' as `0x${string}`,
-    decimals: 18
-  }
+const AAVE_RESERVE_ASSETS: ReserveAsset[] = [
+  { name: 'USDC (Native)',   address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6 },
+  { name: 'USDC.e (Bridged)', address: '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8', decimals: 6 },
+  { name: 'USDT',            address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', decimals: 6 },
+  { name: 'DAI',             address: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1', decimals: 18 },
+  { name: 'WETH',            address: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', decimals: 18 },
+  { name: 'WBTC',            address: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f', decimals: 8 },
+  { name: 'wstETH',          address: '0x5979D7b546E38E414F7E9822514be443A4800529', decimals: 18 },
+  { name: 'weETH',           address: '0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe', decimals: 18 },
+  { name: 'ARB',             address: '0x912CE59144191C1204E64559FE8253a0e49E6548', decimals: 18 },
+  { name: 'LINK',            address: '0xf97f4df75117a78c1A5a0DBb814Af92458539FB4', decimals: 18 },
+  { name: 'AAVE',            address: '0xba5DdD1f9d7F570dc94a51479a000E3BCE967196', decimals: 18 }
 ];
 
 // Aave, Oracle ve Akıllı Sözleşme Arayüz Tanımları (ABI)
@@ -115,7 +94,7 @@ const botContractAbi = parseAbi([
 
 
 // ============================================================================
-// 3. KALICI HAFIZA, KULLANICI RADARI VE ÇARPIŞMA KİLİTLERİ
+// 3. KALICI HAFIZA, 3 KADEMELİ RADAR VE ÇARPIŞMA KİLİTLERİ
 // ============================================================================
 const DATA_DIR = path.join(__dirname, '../data');
 const STORAGE_FILE = path.join(DATA_DIR, 'monitored_users.json');
@@ -123,7 +102,10 @@ const STORAGE_FILE = path.join(DATA_DIR, 'monitored_users.json');
 // activeUsers: Radardaki tüm borçlu adresleri.
 const activeUsers = new Set<`0x${string}`>();
 
-// criticalTargets: Sağlık faktörü 1.12'nin altında olan yüksek öncelikli hedefler (Keskin nişancı listesi).
+// ultraCriticalTargets: HF < 1.045 olan ve saniyede 1 kez taranan ölüm sınırındaki hedefler.
+const ultraCriticalTargets = new Set<`0x${string}`>();
+
+// criticalTargets: 1.045 <= HF <= 1.12 olan ve 3 saniyede 1 kez taranan hedefler.
 const criticalTargets = new Set<`0x${string}`>();
 
 // cooldowns: Aynı adrese mükerrer işlem atılmasını önlemek için bekleme süreleri.
@@ -174,34 +156,32 @@ function scheduleSaveUsers() {
 
 
 // ============================================================================
-// 4. GERÇEK USD DEĞERİNE GÖRE DİNAMİK BORÇ VE TEMİNAT TESPİTİ (MULTICALL)
+// 4. GERÇEK USD DEĞERİNE GÖRE ÇOKLU ADAY ÇİFT TESPİTİ (MULTICALL)
 // ============================================================================
-// Tek bir Multicall RPC isteğiyle tüm borçları, teminatları, "usageAsCollateralEnabled" durumunu
-// ve Aave Oracle USD fiyatlarını aynı milisaniyede okur.
-// Böylece:
-// 1. 6 sıralı sorgu yerine 1 sorgu atılarak ~600ms hız kazanılır.
-// 2. WBTC (8 ondalık) ile ARB/WETH (18 ondalık) adet olarak değil, gerçek DOLAR ($ USD) değerine göre kıyaslanır.
-// 3. Kullanıcının teminat olarak aktif etmediği (usageAsCollateralEnabled == false) varlıklar elenir.
-async function getBestLiquidationTarget(userAddress: `0x${string}`) {
-  try {
-    const allAssetAddresses = [
-      ...DEBT_ASSETS.map(d => d.address),
-      ...COLLATERAL_ASSETS.map(c => c.address)
-    ];
+interface LiquidationCandidate {
+  debtAsset: `0x${string}`;
+  debtName: string;
+  debtAmount: bigint;
+  debtDecimals: number;
+  debtUSD: number;
+  collateralAsset: `0x${string}`;
+  collateralName: string;
+  collateralUSD: number;
+}
 
-    // Tüm rezerv verilerini ve Oracle fiyatlarını tek bir Multicall paketinde topluyoruz
+// Tek bir Multicall RPC isteğiyle 11 ana Aave varlığının tamamı için borçları, teminatları,
+// "usageAsCollateralEnabled" durumunu ve Aave Oracle USD fiyatlarını aynı milisaniyede okur.
+// En yüksek kâr potansiyeline sahip geçerli (borç != teminat) çiftleri sırasıyla döndürür.
+async function getLiquidationCandidates(userAddress: `0x${string}`): Promise<LiquidationCandidate[]> {
+  try {
+    const allAssetAddresses = AAVE_RESERVE_ASSETS.map(a => a.address);
+
     const contracts = [
-      ...DEBT_ASSETS.map(debt => ({
+      ...AAVE_RESERVE_ASSETS.map(asset => ({
         address: AAVE_DATA_PROVIDER_ADDRESS,
         abi: [getUserReserveDataAbi] as const,
         functionName: 'getUserReserveData' as const,
-        args: [debt.address, userAddress] as const
-      })),
-      ...COLLATERAL_ASSETS.map(col => ({
-        address: AAVE_DATA_PROVIDER_ADDRESS,
-        abi: [getUserReserveDataAbi] as const,
-        functionName: 'getUserReserveData' as const,
-        args: [col.address, userAddress] as const
+        args: [asset.address, userAddress] as const
       })),
       {
         address: AAVE_ORACLE_ADDRESS,
@@ -213,79 +193,76 @@ async function getBestLiquidationTarget(userAddress: `0x${string}`) {
 
     const results = await publicClient.multicall({ contracts, allowFailure: true });
 
-    // Oracle fiyatlarını ayıkla (Aave Oracle fiyatları 8 ondalıklı USD formatındadır)
     const priceResult = results[results.length - 1];
     const pricesRaw = (priceResult.status === 'success' ? priceResult.result : null) as bigint[] | null;
 
-    // 1. En yüksek USD değerine sahip BORÇ varlığını belirle
-    let selectedDebt: typeof DEBT_ASSETS[0] | null = null;
-    let maxDebtAmount = 0n;
-    let maxDebtUSD = 0;
+    const userDebts: { asset: ReserveAsset; amount: bigint; usd: number }[] = [];
+    const userCollaterals: { asset: ReserveAsset; usd: number }[] = [];
 
-    for (let i = 0; i < DEBT_ASSETS.length; i++) {
-      const debt = DEBT_ASSETS[i];
+    for (let i = 0; i < AAVE_RESERVE_ASSETS.length; i++) {
+      const asset = AAVE_RESERVE_ASSETS[i];
       const res = results[i];
       if (res.status === 'success' && res.result) {
-        const [, , currentVariableDebt] = res.result as readonly [bigint, bigint, bigint, bigint, bigint, bigint, bigint, number, boolean];
-        if (currentVariableDebt > 0n) {
-          const priceUSD = pricesRaw ? Number(pricesRaw[i]) / 1e8 : 1.0;
-          const tokenAmount = Number(formatUnits(currentVariableDebt, debt.decimals));
-          const valueUSD = tokenAmount * priceUSD;
+        const [currentATokenBalance, currentStableDebt, currentVariableDebt, , , , , , usageAsCollateralEnabled] =
+          res.result as readonly [bigint, bigint, bigint, bigint, bigint, bigint, bigint, number, boolean];
 
-          if (valueUSD > maxDebtUSD) {
-            maxDebtUSD = valueUSD;
-            maxDebtAmount = currentVariableDebt;
-            selectedDebt = debt;
+        const priceUSD = pricesRaw ? Number(pricesRaw[i]) / 1e8 : 1.0;
+
+        // Toplam borç bakiyesi (Değişken + Sabit borç)
+        const totalAssetDebt = currentVariableDebt + currentStableDebt;
+        if (totalAssetDebt > 0n) {
+          const debtTokenAmount = Number(formatUnits(totalAssetDebt, asset.decimals));
+          const debtValueUSD = debtTokenAmount * priceUSD;
+          if (debtValueUSD >= MIN_STRIKE_DEBT_USD) {
+            userDebts.push({ asset, amount: totalAssetDebt, usd: debtValueUSD });
           }
         }
-      }
-    }
 
-    if (!selectedDebt || maxDebtAmount === 0n) {
-      return null;
-    }
-
-    // 2. En yüksek USD değerine sahip ve TEMİNAT OLARAK AÇIK (usageAsCollateralEnabled) varlığı belirle
-    let selectedCollateral: typeof COLLATERAL_ASSETS[0] | null = null;
-    let maxCollateralUSD = 0;
-
-    for (let j = 0; j < COLLATERAL_ASSETS.length; j++) {
-      const col = COLLATERAL_ASSETS[j];
-      const res = results[DEBT_ASSETS.length + j];
-      if (res.status === 'success' && res.result) {
-        const [currentATokenBalance, , , , , , , , usageAsCollateralEnabled] = res.result as readonly [bigint, bigint, bigint, bigint, bigint, bigint, bigint, number, boolean];
-        // Sadece teminat olarak aktif edilmiş ve bakiyesi olan varlıkları değerlendir
+        // Teminat olarak aktif edilmiş ve bakiyesi olan varlıklar
         if (usageAsCollateralEnabled && currentATokenBalance > 0n) {
-          const priceIndex = DEBT_ASSETS.length + j;
-          const priceUSD = pricesRaw ? Number(pricesRaw[priceIndex]) / 1e8 : 1.0;
-          const tokenAmount = Number(formatUnits(currentATokenBalance, col.decimals));
-          const valueUSD = tokenAmount * priceUSD;
-
-          if (valueUSD > maxCollateralUSD) {
-            maxCollateralUSD = valueUSD;
-            selectedCollateral = col;
+          const colTokenAmount = Number(formatUnits(currentATokenBalance, asset.decimals));
+          const colValueUSD = colTokenAmount * priceUSD;
+          if (colValueUSD >= MIN_STRIKE_DEBT_USD) {
+            userCollaterals.push({ asset, usd: colValueUSD });
           }
         }
       }
     }
 
-    if (!selectedCollateral || maxCollateralUSD === 0) {
-      return null;
+    if (userDebts.length === 0 || userCollaterals.length === 0) {
+      return [];
     }
 
-    return {
-      debtAsset: selectedDebt.address,
-      debtName: selectedDebt.name,
-      debtAmount: maxDebtAmount,
-      debtDecimals: selectedDebt.decimals,
-      debtUSD: maxDebtUSD,
-      collateralAsset: selectedCollateral.address,
-      collateralName: selectedCollateral.name,
-      collateralUSD: maxCollateralUSD
-    };
+    // Borçları ve teminatları USD büyüklüğüne göre büyükten küçüğe sırala
+    userDebts.sort((a, b) => b.usd - a.usd);
+    userCollaterals.sort((a, b) => b.usd - a.usd);
+
+    // Geçerli (borç token'ı != teminat token'ı) tüm kombinasyonları oluştur
+    // (Uniswap V3 üzerinde aynı token'ı kendisine takas etmeye çalışmamak için şarttır)
+    const candidates: LiquidationCandidate[] = [];
+    for (const d of userDebts) {
+      for (const c of userCollaterals) {
+        if (d.asset.address.toLowerCase() !== c.asset.address.toLowerCase()) {
+          candidates.push({
+            debtAsset: d.asset.address,
+            debtName: d.asset.name,
+            debtAmount: d.amount,
+            debtDecimals: d.asset.decimals,
+            debtUSD: d.usd,
+            collateralAsset: c.asset.address,
+            collateralName: c.asset.name,
+            collateralUSD: c.usd
+          });
+        }
+      }
+    }
+
+    // En yüksek tasfiye edilebilir USD hacmine göre sırala ve en iyi 3 adayı döndür
+    candidates.sort((a, b) => Math.min(b.debtUSD, b.collateralUSD) - Math.min(a.debtUSD, a.collateralUSD));
+    return candidates.slice(0, 3);
   } catch (err: any) {
-    logInfo(`Failed to evaluate liquidation target pairs for ${userAddress}: ${err.message}`);
-    return null;
+    logInfo(`Failed to evaluate liquidation candidates for ${userAddress}: ${err.message}`);
+    return [];
   }
 }
 
@@ -296,78 +273,99 @@ async function getBestLiquidationTarget(userAddress: `0x${string}`) {
 // Sağlık faktörü 1.0'ın altına inen bir pozisyon yakalandığı milisaniye bu fonksiyon devreye girer.
 async function executeLiquidationStrike(userAddress: `0x${string}`, healthFactor: number, totalDebtUSD: number) {
   const now = Date.now();
-  cooldowns.set(userAddress, now + 120000); // Mükerrer çağrıyı önlemek için 2 dakika bekleme
+  // Başlangıçta kısa bekleme süresi (Simülasyon başarısız olursa sadece 4 saniye sonra tekrar deneyecek!)
+  cooldowns.set(userAddress, now + 4000);
 
   logAlert(`LIQUIDATION TARGET IDENTIFIED | Target: ${userAddress} | HF: ${healthFactor.toFixed(4)} | Total Debt: $${totalDebtUSD.toFixed(2)}`);
 
-  // En yüksek USD değerine sahip borç ve teminat çiftini tek seferde belirle
-  const target = await getBestLiquidationTarget(userAddress);
-  if (!target) {
-    logInfo(`No liquidatable supported debt/collateral pair found for ${userAddress}. Aborting strike.`);
-    return;
-  }
-
-  // AAVE V3 DİNAMİK KAPATMA FAKTÖRÜ (Close Factor) HESABI:
-  // HF <= 0.95 ise borcun %100'ü, 0.95 < HF < 1.0 ise borcun maksimum %50'si tasfiye edilebilir.
-  let debtToCover = healthFactor <= 0.95 ? target.debtAmount : target.debtAmount / 2n;
-  let coverUSD = healthFactor <= 0.95 ? target.debtUSD : target.debtUSD / 2;
-
-  // TEMİNAT TAVANI KORUMASI (Collateral Cap):
-  // Eğer kapatılmak istenen borç tutarı + %6 tasfiye bonusu, seçilen teminatın toplam USD değerini aşıyorsa,
-  // işlemin "yetersiz teminat" nedeniyle Revert etmemesi için borç miktarını teminatın karşılayabileceği maksimum seviyeye çekiyoruz.
-  const maxCoverableByCollateralUSD = target.collateralUSD / 1.06;
-  if (coverUSD > maxCoverableByCollateralUSD) {
-    const scaleRatio = BigInt(Math.floor((maxCoverableByCollateralUSD / coverUSD) * 10000));
-    debtToCover = (debtToCover * scaleRatio) / 10000n;
-    coverUSD = maxCoverableByCollateralUSD;
-  }
-
-  // SIFIR ZARAR KALKANI 1: Kapatılacak gerçek borç miktarı en az $25 olmalıdır.
-  if (coverUSD < MIN_STRIKE_DEBT_USD || debtToCover === 0n) {
-    logInfo(`Coverable debt ($${coverUSD.toFixed(2)}) is below minimum profitable strike threshold ($${MIN_STRIKE_DEBT_USD}). Aborting to protect gas.`);
-    return;
-  }
-
-  const humanDebt = Number(formatUnits(debtToCover, target.debtDecimals));
-  logInfo(`Preparing liquidation strike | Collateral: ${target.collateralName} ($${target.collateralUSD.toFixed(2)}) | Debt to Cover: ${humanDebt.toFixed(2)} ${target.debtName} (~$${coverUSD.toFixed(2)})...`);
-
+  // SIFIR ZARAR KALKANI 1: Anormal Ağ Gas Fiyatı Kontrolü
   try {
-    // SIFIR ZARAR KALKANI 2: Anormal Ağ Gas Fiyatı Kontrolü
     const gasPrice = await publicClient.getGasPrice();
     const gasPriceGwei = Number(gasPrice) / 1e9;
     if (gasPriceGwei > MAX_GAS_PRICE_GWEI) {
       logInfo(`Network gas price (${gasPriceGwei.toFixed(2)} Gwei) exceeds safety cap (${MAX_GAS_PRICE_GWEI} Gwei). Aborting strike.`);
       return;
     }
+  } catch {
+    // Gas fiyatı okunamazsa simülasyon adımına devam et
+  }
 
-    // SIFIR ZARAR KALKANI 3: SIFIR MALİYETLİ ÖN SİMÜLASYON
-    // İşlem blokzincirine gönderilmeden önce RPC düğümünde simüle edilir.
-    // Akıllı sözleşmedeki "require(amountOut >= totalDebt)" kontrolü sayesinde, takas çıktısı flaş kredi + faizi
-    // karşılamıyorsa veya başka bir bot milisaniyeler önce vurduysa simülasyon reddedilir ve 0.00 ETH gas harcanır.
-    const { request } = await publicClient.simulateContract({
-      address: OUR_BOT_CONTRACT_ADDRESS,
-      abi: botContractAbi,
-      functionName: 'triggerLiquidation',
-      args: [target.debtAsset, target.collateralAsset, userAddress, debtToCover],
-      account: account
-    });
+  // En yüksek USD değerine sahip aday (borç / teminat) çiftlerini tek seferde al
+  const candidates = await getLiquidationCandidates(userAddress);
+  if (candidates.length === 0) {
+    logInfo(`No liquidatable distinct debt/collateral pair found for ${userAddress}.`);
+    cooldowns.set(userAddress, now + 30000);
+    return;
+  }
 
-    // İŞLEMİ AĞA GÖNDERME (VURMA EYLEMİ)
-    logAlert(`SIMULATION PASSED. BROADCASTING HIGH-PRIORITY LIQUIDATION TRANSACTION...`);
-    const txHash = await walletClient.writeContract(request);
-    logAlert(`STRIKE EXECUTED! Transaction broadcasted to Arbitrum Sequencer. TxHash: ${txHash}`);
+  // Aday çiftleri sırasıyla dene (Örn: İlk çiftin Uniswap havuzu sığ ise anında ikinci çifte geçer)
+  for (const target of candidates) {
+    // AAVE V3 DİNAMİK KAPATMA FAKTÖRÜ (Close Factor) HESABI:
+    // HF <= 0.95 ise borcun %100'ü, 0.95 < HF < 1.0 ise borcun maksimum %50'si tasfiye edilebilir.
+    let fullDebtToCover = healthFactor <= 0.95 ? target.debtAmount : target.debtAmount / 2n;
+    let fullCoverUSD = healthFactor <= 0.95 ? target.debtUSD : target.debtUSD / 2;
 
-  } catch (simError: any) {
-    const errorText = simError.shortMessage || simError.message.split('\n')[0];
-    logInfo(`Simulation reverted: ${errorText}. Gas protected, no funds lost.`);
+    // TEMİNAT TAVANI KORUMASI (Collateral Cap):
+    const maxCoverableByCollateralUSD = target.collateralUSD / 1.06;
+    if (fullCoverUSD > maxCoverableByCollateralUSD) {
+      const scaleRatio = BigInt(Math.floor((maxCoverableByCollateralUSD / fullCoverUSD) * 10000));
+      fullDebtToCover = (fullDebtToCover * scaleRatio) / 10000n;
+      fullCoverUSD = maxCoverableByCollateralUSD;
+    }
+
+    if (fullCoverUSD < MIN_STRIKE_DEBT_USD || fullDebtToCover === 0n) {
+      continue;
+    }
+
+    // KISMİ TASFİYE (PARTIAL LIQUIDATION) STRATEJİSİ:
+    // Büyük balina pozisyonlarında ($10,000+ üzeri) tek seferde tüm borcu takas etmek Uniswap havuzunda fiyat kayması (slippage)
+    // yaratıp simülasyonu bozabilir. Bu yüzden önce tam miktarı, eğer reddedilirse %25'lik daha düşük kaymalı miktarı simüle ederiz.
+    const strikeAttempts: { amount: bigint; usd: number; label: string }[] = [
+      { amount: fullDebtToCover, usd: fullCoverUSD, label: 'FULL' }
+    ];
+    if (fullCoverUSD >= 10000) {
+      strikeAttempts.push({
+        amount: fullDebtToCover / 4n,
+        usd: fullCoverUSD / 4,
+        label: 'PARTIAL-25%'
+      });
+    }
+
+    for (const attempt of strikeAttempts) {
+      const humanDebt = Number(formatUnits(attempt.amount, target.debtDecimals));
+      logInfo(`Simulating [${attempt.label}] strike | Pair: ${target.collateralName} -> ${target.debtName} | Covering: ${humanDebt.toFixed(4)} ${target.debtName} (~$${attempt.usd.toFixed(2)})...`);
+
+      try {
+        // SIFIR ZARAR KALKANI 2: SIFIR MALİYETLİ ÖN SİMÜLASYON
+        // Akıllı sözleşmedeki "require(amountOut >= totalDebt)" kontrolü sayesinde kârsız işlemler burada elenir (0.00 ETH gas).
+        const { request } = await publicClient.simulateContract({
+          address: OUR_BOT_CONTRACT_ADDRESS,
+          abi: botContractAbi,
+          functionName: 'triggerLiquidation',
+          args: [target.debtAsset, target.collateralAsset, userAddress, attempt.amount],
+          account: account
+        });
+
+        // SİMÜLASYON BAŞARILI! İŞLEMİ DERHAL AĞA GÖNDER
+        logAlert(`SIMULATION PASSED! BROADCASTING LIQUIDATION TRANSACTION (${target.collateralName} -> ${target.debtName})...`);
+        const txHash = await walletClient.writeContract(request);
+        logAlert(`STRIKE EXECUTED SUCCESSFULLY! TxHash: ${txHash}`);
+
+        // İşlem ağa gönderildiği için mükerrer gönderimi önlemek adına 60 saniye bekleme tanımla
+        cooldowns.set(userAddress, Date.now() + 60000);
+        return;
+      } catch (simError: any) {
+        const errorText = simError.shortMessage || simError.message.split('\n')[0];
+        logInfo(`Simulation reverted (${target.collateralName} -> ${target.debtName} [${attempt.label}]): ${errorText}`);
+      }
+    }
   }
 }
 
 
 // ============================================================================
-// 6. KULLANICI SAĞLIK DEĞERLENDİRMESİ VE TOPLU TARAMA (MULTICALL SWEEP)
+// 6. KULLANICI SAĞLIK DEĞERLENDİRMESİ VE 3 KADEMELİ SINIFLANDIRMA
 // ============================================================================
-// Okunan hesap verisini (getUserAccountData) değerlendirir ve kullanıcıyı ilgili kademeye atar.
 async function processUserAccountData(
   userAddress: `0x${string}`,
   data: readonly [bigint, bigint, bigint, bigint, bigint, bigint]
@@ -386,7 +384,6 @@ async function processUserAccountData(
       return;
     }
 
-    // Çarpışma kilidini aktif et (İki döngünün aynı anda aynı adrese vurmasını engeller)
     inFlightUsers.add(userAddress);
     try {
       await executeLiquidationStrike(userAddress, healthFactor, totalDebtUSD);
@@ -394,20 +391,27 @@ async function processUserAccountData(
       inFlightUsers.delete(userAddress);
     }
   }
-  // DURUM 2: BORÇLU ÖLÜM SINIRINDA (HF 1.0 ile 1.12 ARASI)
-  else if (healthFactor >= 1.0 && healthFactor <= CRITICAL_HF_THRESHOLD && totalDebtUSD >= MIN_DEBT_USD) {
+  // DURUM 2: ULTRA-KRİTİK BÖLGE (1.0 <= HF < 1.045) -> HER 1 SANİYEDE BİR TARANACAK!
+  else if (healthFactor >= 1.0 && healthFactor < ULTRA_CRITICAL_HF_THRESHOLD && totalDebtUSD >= MIN_DEBT_USD) {
+    criticalTargets.delete(userAddress);
+    if (!ultraCriticalTargets.has(userAddress)) {
+      ultraCriticalTargets.add(userAddress);
+      logAlert(`ULTRA-CRITICAL TARGET LOCKED (1s Poll) | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`);
+    }
+  }
+  // DURUM 3: KRİTİK BÖLGE (1.045 <= HF <= 1.12) -> HER 3 SANİYEDE BİR TARANACAK!
+  else if (healthFactor >= ULTRA_CRITICAL_HF_THRESHOLD && healthFactor <= CRITICAL_HF_THRESHOLD && totalDebtUSD >= MIN_DEBT_USD) {
+    ultraCriticalTargets.delete(userAddress);
     if (!criticalTargets.has(userAddress)) {
       criticalTargets.add(userAddress);
       logAlert(`HIGH RISK BORROWER PROMOTED TO SNIPER RADAR | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`);
     }
   }
-  // DURUM 3: GÜVENLİ BÖLGE (HF > 1.12)
+  // DURUM 4: GÜVENLİ BÖLGE (HF > 1.12)
   else {
-    if (criticalTargets.has(userAddress)) {
-      criticalTargets.delete(userAddress);
-    }
+    ultraCriticalTargets.delete(userAddress);
+    criticalTargets.delete(userAddress);
     if (totalDebtUSD === 0) {
-      // Borcunu tamamen kapatmışsa radardan tamamen temizle
       activeUsers.delete(userAddress);
       scheduleSaveUsers();
     }
@@ -415,7 +419,6 @@ async function processUserAccountData(
 }
 
 // Belirtilen adres listesini Multicall3 kullanarak TEK BİR RPC İSTEĞİYLE tarar.
-// Eğer RPC Multicall desteklemiyorsa otomatik olarak tekil sorguya düşer (Fallback).
 async function checkUsersBatch(addresses: `0x${string}`[]) {
   const now = Date.now();
   const eligibleAddresses = addresses.filter(
@@ -443,39 +446,43 @@ async function checkUsersBatch(addresses: `0x${string}`[]) {
       }
     }
   } catch {
-    // Multicall başarısız olursa (geçici RPC hatası) sessizce geç
+    // Geçici RPC hatalarını sessizce geç
   }
 }
 
 
 // ============================================================================
-// 7. KESKİN NİŞANCI DÖNGÜSÜ (CRITICAL SNIPER LOOP)
+// 7. 3 KADEMELİ KESKİN NİŞANCI VE RADAR DÖNGÜLERİ
 // ============================================================================
-// Ölüm sınırındaki (HF < 1.12) borçluların tamamını HER 2 SANİYEDE BİR tek bir Multicall isteğiyle tarar.
-// 21 kritik hedefi 21 ayrı istek yerine 1 istekte okuduğu için hem rate-limit yemez hem de ışık hızında tepki verir.
+// Kademe 1: Ultra-Kritik hedefleri (HF < 1.045) HER 1 SANİYEDE BİR tek Multicall ile tarar.
+async function ultraCriticalSniperLoop() {
+  if (ultraCriticalTargets.size > 0) {
+    const targets = Array.from(ultraCriticalTargets);
+    await checkUsersBatch(targets);
+  }
+  setTimeout(ultraCriticalSniperLoop, 1000);
+}
+
+// Kademe 2: Kritik hedefleri (1.045 <= HF <= 1.12) HER 3 SANİYEDE BİR tek Multicall ile tarar.
 async function criticalSniperLoop() {
   if (criticalTargets.size > 0) {
     const targets = Array.from(criticalTargets);
     await checkUsersBatch(targets);
   }
-  setTimeout(criticalSniperLoop, 2000);
+  setTimeout(criticalSniperLoop, 3000);
 }
 
-
-// ============================================================================
-// 8. GENEL RADAR DÖNGÜSÜ (GENERAL RADAR LOOP)
-// ============================================================================
-// Kritik listede OLMAYAN diğer tüm borçluları 25'erli Multicall paketleri halinde tarar.
-// Böylece 300 adres 300 istek yerine sadece 12 RPC isteğiyle taranır ve iki döngü birbiriyle çakışmaz.
+// Kademe 3: Genel listedeki diğer borçluları 25'erli Multicall paketleri halinde tarar.
 const MULTICALL_BATCH_SIZE = 25;
 const BATCH_DELAY_MS = 300;
 
 async function generalRadarLoop() {
   if (activeUsers.size > 0) {
-    // Kritik listedeki adresler zaten 2 saniyede bir tarandığı için genel döngüde tekrar sorgulanmaz
-    const nonCriticalUsers = Array.from(activeUsers).filter(u => !criticalTargets.has(u));
+    const nonCriticalUsers = Array.from(activeUsers).filter(
+      u => !ultraCriticalTargets.has(u) && !criticalTargets.has(u)
+    );
 
-    logInfo(`Executing sweep across ${activeUsers.size} monitored addresses (Critical Watchlist: ${criticalTargets.size})...`);
+    logInfo(`Executing sweep across ${activeUsers.size} monitored addresses (Ultra-Critical [1s]: ${ultraCriticalTargets.size} | Critical [3s]: ${criticalTargets.size})...`);
 
     for (let i = 0; i < nonCriticalUsers.length; i += MULTICALL_BATCH_SIZE) {
       const chunk = nonCriticalUsers.slice(i, i + MULTICALL_BATCH_SIZE);
@@ -486,15 +493,13 @@ async function generalRadarLoop() {
     }
   }
 
-  // Genel tarama bittikten sonra 15 saniye bekle ve tekrar başla
   setTimeout(generalRadarLoop, 15000);
 }
 
 
 // ============================================================================
-// 9. BAŞLANGIÇ GEÇMİŞ BLOK SENKRONİZASYONU VE ANA MOTOR
+// 8. BAŞLANGIÇ GEÇMİŞ BLOK SENKRONİZASYONU VE ANA MOTOR
 // ============================================================================
-// Bot kapalıyken Aave'den borç almış yeni cüzdanları yakalamak için son 3.000 bloğu tarar.
 async function syncRecentBorrowers(currentBlock: bigint) {
   const LOOKBACK = 3000n;
   const CHUNK = 1000n;
@@ -529,7 +534,6 @@ async function syncRecentBorrowers(currentBlock: bigint) {
   }
 }
 
-// Başlangıçta RPC geçici rate-limit hatası verirse çökmemesi için güvenli bağlantı fonksiyonu
 async function getBlockNumberWithRetry(): Promise<bigint> {
   while (true) {
     try {
@@ -549,14 +553,14 @@ async function main() {
   // 1. Hafızadaki tüm kayıtlı borçluları yükle
   loadMonitoredUsers();
 
-  // 2. Ağ bağlantısını doğrula (Rate-limit durumunda çökmeden bekler ve bağlanır)
+  // 2. Ağ bağlantısını doğrula
   const currentBlock = await getBlockNumberWithRetry();
   logInfo(`Connected to Arbitrum Network. Current Block: ${currentBlock}`);
 
   // 3. Arka planda son bloklardaki yeni borçluları senkronize et
   syncRecentBorrowers(currentBlock);
 
-  // 4. Canlı ağda gerçekleşen yeni borçlanma olaylarını (Borrow events) hata korumalı dinle
+  // 4. Canlı ağda gerçekleşen yeni borçlanma olaylarını dinle
   publicClient.watchEvent({
     address: AAVE_POOL_ADDRESS,
     event: borrowEventAbi,
@@ -579,17 +583,18 @@ async function main() {
       }
     },
     onError: () => {
-      // Halka açık RPC'de geçici filtre kopmalarında sürecin çökmesini engeller
+      // Halka açık RPC filtre kopmalarında sürecin çökmesini engeller
     }
   });
 
-  // 5. İki paralel döngüyü birden başlat:
-  // - criticalSniperLoop: Kritik hedefleri (HF < 1.12) 2 saniyede bir tek Multicall ile tarar.
-  // - generalRadarLoop: Geri kalan tüm veritabanını 25'erli Multicall paketleriyle tarar.
-  logInfo(`Starting dual-tier Multicall radar loops. Monitoring ${activeUsers.size} addresses.`);
+  // 5. Üç paralel kademeli döngüyü birden başlat:
+  // - ultraCriticalSniperLoop: HF < 1.045 olanları 1 saniyede bir tarar.
+  // - criticalSniperLoop: 1.045 <= HF <= 1.12 olanları 3 saniyede bir tarar.
+  // - generalRadarLoop: Tüm veritabanını 25'erli Multicall paketleriyle tarar.
+  logInfo(`Starting 3-tier Multicall radar loops. Monitoring ${activeUsers.size} addresses.`);
+  ultraCriticalSniperLoop();
   criticalSniperLoop();
   generalRadarLoop();
 }
 
-// Olası beklenmedik hataları yakala
 main().catch(err => console.error(`[FATAL ERROR] ${err.message}`));
