@@ -133,21 +133,27 @@ const targetStrikeCache = new Map<`0x${string}`, { candidates: LiquidationCandid
 function logInfo(message: string) { console.log(`[INFO] ${new Date().toISOString().split('T')[1].slice(0,-1)} - ${message}`); }
 function logAlert(message: string) { console.log(`[ALERT] ${new Date().toISOString().split('T')[1].slice(0,-1)} - ${message}`); }
 
-// Sunucu yeniden başladığında kaydedilmiş borçlu listesini yükler.
+// Sunucu yeniden başladığında kaydedilmiş borçlu listesini yükler; dosya yoksa otomatik oluşturur.
 function loadMonitoredUsers() {
   try {
-    if (fs.existsSync(STORAGE_FILE)) {
-      const rawData = fs.readFileSync(STORAGE_FILE, 'utf-8');
-      const addresses: string[] = JSON.parse(rawData);
-      let validCount = 0;
-      for (const addr of addresses) {
-        if (isAddress(addr)) {
-          activeUsers.add(getAddress(addr));
-          validCount++;
-        }
-      }
-      logInfo(`Loaded ${validCount} active borrowers from local persistent storage into radar.`);
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
     }
+    if (!fs.existsSync(STORAGE_FILE)) {
+      fs.writeFileSync(STORAGE_FILE, JSON.stringify([], null, 2), 'utf-8');
+      logInfo(`Created new empty persistent storage file at ${STORAGE_FILE}`);
+      return;
+    }
+    const rawData = fs.readFileSync(STORAGE_FILE, 'utf-8');
+    const addresses: string[] = JSON.parse(rawData);
+    let validCount = 0;
+    for (const addr of addresses) {
+      if (isAddress(addr)) {
+        activeUsers.add(getAddress(addr));
+        validCount++;
+      }
+    }
+    logInfo(`Loaded ${validCount} active borrowers from local persistent storage into radar.`);
   } catch (err: any) {
     logInfo(`Local storage read error: ${err.message}. Starting fresh.`);
   }

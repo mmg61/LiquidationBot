@@ -6,8 +6,10 @@ dist/
 .env
 .env.*
 
-# Project Memory & Internal Context
+# Project Memory & Local Runtime Data
 PROJECT_MEMORY.md
+bot/data/monitored_users.json
+monitored_users.json
 
 # Foundry / Solidity
 cache/
