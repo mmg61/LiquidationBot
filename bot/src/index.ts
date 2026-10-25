@@ -56,7 +56,7 @@ const MIN_STRIKE_DEBT_USD = 25.0;
 const MAX_GAS_PRICE_GWEI = 5.0;
 
 // 3 KADEMELİ RADAR EŞİKLERİ:
-// 1. Ultra-Kritik Eşik (HF < 1.045): Tasfiyeye %1-%4 kalmış hedefler -> HER 1 SANİYEDE BİR taranır.
+// 1. Ultra-Kritik Eşik (HF < 1.045): Tasfiyeye %1-%4 kalmış hedefler -> HER 400 MİLİSANİYEDE BİR taranır ve mermisi önceden hazırlanır (Pre-Cached).
 const ULTRA_CRITICAL_HF_THRESHOLD = 1.045;
 // 2. Kritik Takip Eşiği (1.045 <= HF <= 1.12): Yakın riskteki hedefler -> HER 3 SANİYEDE BİR taranır.
 const CRITICAL_HF_THRESHOLD = 1.12;
@@ -69,17 +69,17 @@ interface ReserveAsset {
 }
 
 const AAVE_RESERVE_ASSETS: ReserveAsset[] = [
-  { name: 'USDC (Native)',   address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6 },
+  { name: 'USDC (Native)',    address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6 },
   { name: 'USDC.e (Bridged)', address: '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8', decimals: 6 },
-  { name: 'USDT',            address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', decimals: 6 },
-  { name: 'DAI',             address: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1', decimals: 18 },
-  { name: 'WETH',            address: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', decimals: 18 },
-  { name: 'WBTC',            address: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f', decimals: 8 },
-  { name: 'wstETH',          address: '0x5979D7b546E38E414F7E9822514be443A4800529', decimals: 18 },
-  { name: 'weETH',           address: '0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe', decimals: 18 },
-  { name: 'ARB',             address: '0x912CE59144191C1204E64559FE8253a0e49E6548', decimals: 18 },
-  { name: 'LINK',            address: '0xf97f4df75117a78c1A5a0DBb814Af92458539FB4', decimals: 18 },
-  { name: 'AAVE',            address: '0xba5DdD1f9d7F570dc94a51479a000E3BCE967196', decimals: 18 }
+  { name: 'USDT',             address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', decimals: 6 },
+  { name: 'DAI',              address: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1', decimals: 18 },
+  { name: 'WETH',             address: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', decimals: 18 },
+  { name: 'WBTC',             address: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f', decimals: 8 },
+  { name: 'wstETH',           address: '0x5979D7b546E38E414F7E9822514be443A4800529', decimals: 18 },
+  { name: 'weETH',            address: '0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe', decimals: 18 },
+  { name: 'ARB',              address: '0x912CE59144191C1204E64559FE8253a0e49E6548', decimals: 18 },
+  { name: 'LINK',             address: '0xf97f4df75117a78c1A5a0DBb814Af92458539FB4', decimals: 18 },
+  { name: 'AAVE',             address: '0xba5DdD1f9d7F570dc94a51479a000E3BCE967196', decimals: 18 }
 ];
 
 // Aave, Oracle ve Akıllı Sözleşme Arayüz Tanımları (ABI)
@@ -87,6 +87,7 @@ const getUserAccountDataAbi = parseAbiItem('function getUserAccountData(address 
 const getUserReserveDataAbi = parseAbiItem('function getUserReserveData(address asset, address user) view returns (uint256 currentATokenBalance, uint256 currentStableDebt, uint256 currentVariableDebt, uint256 principalStableDebt, uint256 scaledVariableDebt, uint256 stableBorrowRate, uint256 liquidityRate, uint40 stableRateLastUpdated, bool usageAsCollateralEnabled)');
 const getAssetsPricesAbi = parseAbiItem('function getAssetsPrices(address[] assets) view returns (uint256[])');
 const borrowEventAbi = parseAbiItem('event Borrow(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount, uint8 interestRateMode, uint256 borrowRate, uint16 indexed referralCode)');
+const liquidationCallEventAbi = parseAbiItem('event LiquidationCall(address indexed collateralAsset, address indexed debtAsset, address indexed user, uint256 debtToCover, uint256 liquidatedCollateralAmount, address liquidator, bool receiveAToken)');
 const botContractAbi = parseAbi([
   'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover) external',
   'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover, uint24 poolFee) external'
@@ -94,7 +95,7 @@ const botContractAbi = parseAbi([
 
 
 // ============================================================================
-// 3. KALICI HAFIZA, 3 KADEMELİ RADAR VE ÇARPIŞMA KİLİTLERİ
+// 3. KALICI HAFIZA, 3 KADEMELİ RADAR VE ÖN-HAZIRLIK ÖNBELLEĞİ (PRE-CACHE)
 // ============================================================================
 const DATA_DIR = path.join(__dirname, '../data');
 const STORAGE_FILE = path.join(DATA_DIR, 'monitored_users.json');
@@ -102,7 +103,7 @@ const STORAGE_FILE = path.join(DATA_DIR, 'monitored_users.json');
 // activeUsers: Radardaki tüm borçlu adresleri.
 const activeUsers = new Set<`0x${string}`>();
 
-// ultraCriticalTargets: HF < 1.045 olan ve saniyede 1 kez taranan ölüm sınırındaki hedefler.
+// ultraCriticalTargets: HF < 1.045 olan ve 400 milisaniyede 1 kez taranan ölüm sınırındaki hedefler.
 const ultraCriticalTargets = new Set<`0x${string}`>();
 
 // criticalTargets: 1.045 <= HF <= 1.12 olan ve 3 saniyede 1 kez taranan hedefler.
@@ -113,6 +114,21 @@ const cooldowns = new Map<string, number>();
 
 // inFlightUsers: Aynı milisaniyede iki farklı döngünün aynı kullanıcıya işlem göndermesini engelleyen kilit kümesi.
 const inFlightUsers = new Set<`0x${string}`>();
+
+interface LiquidationCandidate {
+  debtAsset: `0x${string}`;
+  debtName: string;
+  debtAmount: bigint;
+  debtDecimals: number;
+  debtUSD: number;
+  collateralAsset: `0x${string}`;
+  collateralName: string;
+  collateralUSD: number;
+}
+
+// targetStrikeCache: Ultra-Kritik hedeflerin borç/teminat çiftlerini HF < 1.0 olmadan ÖNCE bellekte hazır tutar.
+// Bu sayede HF < 1.0 olduğu milisaniye token aramakla 450ms vakit kaybedilmez, doğrudan simülasyon ve vuruş yapılır!
+const targetStrikeCache = new Map<`0x${string}`, { candidates: LiquidationCandidate[]; updatedAt: number }>();
 
 function logInfo(message: string) { console.log(`[INFO] ${new Date().toISOString().split('T')[1].slice(0,-1)} - ${message}`); }
 function logAlert(message: string) { console.log(`[ALERT] ${new Date().toISOString().split('T')[1].slice(0,-1)} - ${message}`); }
@@ -158,20 +174,8 @@ function scheduleSaveUsers() {
 // ============================================================================
 // 4. GERÇEK USD DEĞERİNE GÖRE ÇOKLU ADAY ÇİFT TESPİTİ (MULTICALL)
 // ============================================================================
-interface LiquidationCandidate {
-  debtAsset: `0x${string}`;
-  debtName: string;
-  debtAmount: bigint;
-  debtDecimals: number;
-  debtUSD: number;
-  collateralAsset: `0x${string}`;
-  collateralName: string;
-  collateralUSD: number;
-}
-
 // Tek bir Multicall RPC isteğiyle 11 ana Aave varlığının tamamı için borçları, teminatları,
 // "usageAsCollateralEnabled" durumunu ve Aave Oracle USD fiyatlarını aynı milisaniyede okur.
-// En yüksek kâr potansiyeline sahip geçerli (borç != teminat) çiftleri sırasıyla döndürür.
 async function getLiquidationCandidates(userAddress: `0x${string}`): Promise<LiquidationCandidate[]> {
   try {
     const allAssetAddresses = AAVE_RESERVE_ASSETS.map(a => a.address);
@@ -233,12 +237,9 @@ async function getLiquidationCandidates(userAddress: `0x${string}`): Promise<Liq
       return [];
     }
 
-    // Borçları ve teminatları USD büyüklüğüne göre büyükten küçüğe sırala
     userDebts.sort((a, b) => b.usd - a.usd);
     userCollaterals.sort((a, b) => b.usd - a.usd);
 
-    // Geçerli (borç token'ı != teminat token'ı) tüm kombinasyonları oluştur
-    // (Uniswap V3 üzerinde aynı token'ı kendisine takas etmeye çalışmamak için şarttır)
     const candidates: LiquidationCandidate[] = [];
     for (const d of userDebts) {
       for (const c of userCollaterals) {
@@ -257,9 +258,12 @@ async function getLiquidationCandidates(userAddress: `0x${string}`): Promise<Liq
       }
     }
 
-    // En yüksek tasfiye edilebilir USD hacmine göre sırala ve en iyi 3 adayı döndür
     candidates.sort((a, b) => Math.min(b.debtUSD, b.collateralUSD) - Math.min(a.debtUSD, a.collateralUSD));
-    return candidates.slice(0, 3);
+    const topCandidates = candidates.slice(0, 3);
+    if (topCandidates.length > 0) {
+      targetStrikeCache.set(userAddress, { candidates: topCandidates, updatedAt: Date.now() });
+    }
+    return topCandidates;
   } catch (err: any) {
     logInfo(`Failed to evaluate liquidation candidates for ${userAddress}: ${err.message}`);
     return [];
@@ -273,39 +277,29 @@ async function getLiquidationCandidates(userAddress: `0x${string}`): Promise<Liq
 // Sağlık faktörü 1.0'ın altına inen bir pozisyon yakalandığı milisaniye bu fonksiyon devreye girer.
 async function executeLiquidationStrike(userAddress: `0x${string}`, healthFactor: number, totalDebtUSD: number) {
   const now = Date.now();
-  // Başlangıçta kısa bekleme süresi (Simülasyon başarısız olursa sadece 4 saniye sonra tekrar deneyecek!)
-  cooldowns.set(userAddress, now + 4000);
+  // Simülasyon reddedilirse 3 saniye sonra tekrar dene
+  cooldowns.set(userAddress, now + 3000);
 
   logAlert(`LIQUIDATION TARGET IDENTIFIED | Target: ${userAddress} | HF: ${healthFactor.toFixed(4)} | Total Debt: $${totalDebtUSD.toFixed(2)}`);
 
-  // SIFIR ZARAR KALKANI 1: Anormal Ağ Gas Fiyatı Kontrolü
-  try {
-    const gasPrice = await publicClient.getGasPrice();
-    const gasPriceGwei = Number(gasPrice) / 1e9;
-    if (gasPriceGwei > MAX_GAS_PRICE_GWEI) {
-      logInfo(`Network gas price (${gasPriceGwei.toFixed(2)} Gwei) exceeds safety cap (${MAX_GAS_PRICE_GWEI} Gwei). Aborting strike.`);
-      return;
-    }
-  } catch {
-    // Gas fiyatı okunamazsa simülasyon adımına devam et
-  }
+  // ÖN-HAZIRLIK ÖNBELLEĞİ (0ms Gecikme):
+  // Eğer hedef Ultra-Kritik listedeyken borç/teminat çiftleri son 60 saniye içinde önbelleğe alındıysa,
+  // 450ms süren RPC sorgusunu atla ve doğrudan önbellekteki hazır mermiyle vur!
+  const cached = targetStrikeCache.get(userAddress);
+  const candidates = (cached && (now - cached.updatedAt < 60000))
+    ? cached.candidates
+    : await getLiquidationCandidates(userAddress);
 
-  // En yüksek USD değerine sahip aday (borç / teminat) çiftlerini tek seferde al
-  const candidates = await getLiquidationCandidates(userAddress);
   if (candidates.length === 0) {
     logInfo(`No liquidatable distinct debt/collateral pair found for ${userAddress}.`);
     cooldowns.set(userAddress, now + 30000);
     return;
   }
 
-  // Aday çiftleri sırasıyla dene (Örn: İlk çiftin Uniswap havuzu sığ ise anında ikinci çifte geçer)
   for (const target of candidates) {
-    // AAVE V3 DİNAMİK KAPATMA FAKTÖRÜ (Close Factor) HESABI:
-    // HF <= 0.95 ise borcun %100'ü, 0.95 < HF < 1.0 ise borcun maksimum %50'si tasfiye edilebilir.
     let fullDebtToCover = healthFactor <= 0.95 ? target.debtAmount : target.debtAmount / 2n;
     let fullCoverUSD = healthFactor <= 0.95 ? target.debtUSD : target.debtUSD / 2;
 
-    // TEMİNAT TAVANI KORUMASI (Collateral Cap):
     const maxCoverableByCollateralUSD = target.collateralUSD / 1.06;
     if (fullCoverUSD > maxCoverableByCollateralUSD) {
       const scaleRatio = BigInt(Math.floor((maxCoverableByCollateralUSD / fullCoverUSD) * 10000));
@@ -317,9 +311,6 @@ async function executeLiquidationStrike(userAddress: `0x${string}`, healthFactor
       continue;
     }
 
-    // KISMİ TASFİYE (PARTIAL LIQUIDATION) STRATEJİSİ:
-    // Büyük balina pozisyonlarında ($10,000+ üzeri) tek seferde tüm borcu takas etmek Uniswap havuzunda fiyat kayması (slippage)
-    // yaratıp simülasyonu bozabilir. Bu yüzden önce tam miktarı, eğer reddedilirse %25'lik daha düşük kaymalı miktarı simüle ederiz.
     const strikeAttempts: { amount: bigint; usd: number; label: string }[] = [
       { amount: fullDebtToCover, usd: fullCoverUSD, label: 'FULL' }
     ];
@@ -336,8 +327,7 @@ async function executeLiquidationStrike(userAddress: `0x${string}`, healthFactor
       logInfo(`Simulating [${attempt.label}] strike | Pair: ${target.collateralName} -> ${target.debtName} | Covering: ${humanDebt.toFixed(4)} ${target.debtName} (~$${attempt.usd.toFixed(2)})...`);
 
       try {
-        // SIFIR ZARAR KALKANI 2: SIFIR MALİYETLİ ÖN SİMÜLASYON
-        // Akıllı sözleşmedeki "require(amountOut >= totalDebt)" kontrolü sayesinde kârsız işlemler burada elenir (0.00 ETH gas).
+        // SIFIR ZARAR KALKANI: SIFIR MALİYETLİ ÖN SİMÜLASYON
         const { request } = await publicClient.simulateContract({
           address: OUR_BOT_CONTRACT_ADDRESS,
           abi: botContractAbi,
@@ -346,12 +336,18 @@ async function executeLiquidationStrike(userAddress: `0x${string}`, healthFactor
           account: account
         });
 
-        // SİMÜLASYON BAŞARILI! İŞLEMİ DERHAL AĞA GÖNDER
+        // SİMÜLASYON BAŞARILI! GAS TAVANINI KONTROL ET VE DERHAL AĞA GÖNDER
+        const gasPrice = await publicClient.getGasPrice();
+        const gasPriceGwei = Number(gasPrice) / 1e9;
+        if (gasPriceGwei > MAX_GAS_PRICE_GWEI) {
+          logInfo(`Network gas price (${gasPriceGwei.toFixed(2)} Gwei) exceeds safety cap (${MAX_GAS_PRICE_GWEI} Gwei). Aborting strike.`);
+          return;
+        }
+
         logAlert(`SIMULATION PASSED! BROADCASTING LIQUIDATION TRANSACTION (${target.collateralName} -> ${target.debtName})...`);
         const txHash = await walletClient.writeContract(request);
         logAlert(`STRIKE EXECUTED SUCCESSFULLY! TxHash: ${txHash}`);
 
-        // İşlem ağa gönderildiği için mükerrer gönderimi önlemek adına 60 saniye bekleme tanımla
         cooldowns.set(userAddress, Date.now() + 60000);
         return;
       } catch (simError: any) {
@@ -380,7 +376,7 @@ async function processUserAccountData(
   // DURUM 1: BORÇLU TASFİYE EDİLEBİLİR DURUMDA (HF < 1.0)
   if (healthFactor > 0 && healthFactor < 1.0) {
     if (totalDebtUSD < MIN_DEBT_USD) {
-      cooldowns.set(userAddress, now + 300000); // 50$ altı mikro borçları 5 dakika atla
+      cooldowns.set(userAddress, now + 300000);
       return;
     }
 
@@ -391,12 +387,17 @@ async function processUserAccountData(
       inFlightUsers.delete(userAddress);
     }
   }
-  // DURUM 2: ULTRA-KRİTİK BÖLGE (1.0 <= HF < 1.045) -> HER 1 SANİYEDE BİR TARANACAK!
+  // DURUM 2: ULTRA-KRİTİK BÖLGE (1.0 <= HF < 1.045) -> HER 400ms'DE BİR TARANACAK + MERMİSİ ÖNCEDEN HAZIRLANACAK!
   else if (healthFactor >= 1.0 && healthFactor < ULTRA_CRITICAL_HF_THRESHOLD && totalDebtUSD >= MIN_DEBT_USD) {
     criticalTargets.delete(userAddress);
     if (!ultraCriticalTargets.has(userAddress)) {
       ultraCriticalTargets.add(userAddress);
-      logAlert(`ULTRA-CRITICAL TARGET LOCKED (1s Poll) | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`);
+      logAlert(`ULTRA-CRITICAL TARGET LOCKED (400ms Poll) | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`);
+    }
+    // Hedefin borç/teminat yapısını önceden önbelleğe al (HF < 1.0 olduğunda 0ms gecikmeyle vurmak için)
+    const cached = targetStrikeCache.get(userAddress);
+    if (!cached || now - cached.updatedAt > 45000) {
+      getLiquidationCandidates(userAddress).catch(() => {});
     }
   }
   // DURUM 3: KRİTİK BÖLGE (1.045 <= HF <= 1.12) -> HER 3 SANİYEDE BİR TARANACAK!
@@ -411,6 +412,7 @@ async function processUserAccountData(
   else {
     ultraCriticalTargets.delete(userAddress);
     criticalTargets.delete(userAddress);
+    targetStrikeCache.delete(userAddress);
     if (totalDebtUSD === 0) {
       activeUsers.delete(userAddress);
       scheduleSaveUsers();
@@ -454,13 +456,13 @@ async function checkUsersBatch(addresses: `0x${string}`[]) {
 // ============================================================================
 // 7. 3 KADEMELİ KESKİN NİŞANCI VE RADAR DÖNGÜLERİ
 // ============================================================================
-// Kademe 1: Ultra-Kritik hedefleri (HF < 1.045) HER 1 SANİYEDE BİR tek Multicall ile tarar.
+// Kademe 1: Ultra-Kritik hedefleri (HF < 1.045) HER 400 MİLİSANİYEDE BİR tek Multicall ile tarar.
 async function ultraCriticalSniperLoop() {
   if (ultraCriticalTargets.size > 0) {
     const targets = Array.from(ultraCriticalTargets);
     await checkUsersBatch(targets);
   }
-  setTimeout(ultraCriticalSniperLoop, 1000);
+  setTimeout(ultraCriticalSniperLoop, 400);
 }
 
 // Kademe 2: Kritik hedefleri (1.045 <= HF <= 1.12) HER 3 SANİYEDE BİR tek Multicall ile tarar.
@@ -482,7 +484,7 @@ async function generalRadarLoop() {
       u => !ultraCriticalTargets.has(u) && !criticalTargets.has(u)
     );
 
-    logInfo(`Executing sweep across ${activeUsers.size} monitored addresses (Ultra-Critical [1s]: ${ultraCriticalTargets.size} | Critical [3s]: ${criticalTargets.size})...`);
+    logInfo(`Executing sweep across ${activeUsers.size} monitored addresses (Ultra-Critical [400ms]: ${ultraCriticalTargets.size} | Critical [3s]: ${criticalTargets.size})...`);
 
     for (let i = 0; i < nonCriticalUsers.length; i += MULTICALL_BATCH_SIZE) {
       const chunk = nonCriticalUsers.slice(i, i + MULTICALL_BATCH_SIZE);
@@ -582,13 +584,35 @@ async function main() {
         scheduleSaveUsers();
       }
     },
-    onError: () => {
-      // Halka açık RPC filtre kopmalarında sürecin çökmesini engeller
-    }
+    onError: () => {}
   });
 
-  // 5. Üç paralel kademeli döngüyü birden başlat:
-  // - ultraCriticalSniperLoop: HF < 1.045 olanları 1 saniyede bir tarar.
+  // 5. Ağdaki gerçek tasfiye olaylarını (LiquidationCall) izle:
+  // Ağda başka bir bot tasfiye yaptığında hedefin bizim radarımızda olup olmadığını raporlar ve adresi radara ekler.
+  publicClient.watchEvent({
+    address: AAVE_POOL_ADDRESS,
+    event: liquidationCallEventAbi,
+    onLogs: logs => {
+      logs.forEach(log => {
+        const user = log.args?.user;
+        const liquidator = log.args?.liquidator;
+        if (user && isAddress(user)) {
+          const checksummed = getAddress(user);
+          const inRadar = activeUsers.has(checksummed);
+          logAlert(`ON-CHAIN LIQUIDATION OBSERVED | User: ${checksummed} | In Our Radar: ${inRadar ? 'YES' : 'NO'} | Liquidator: ${liquidator}`);
+          if (!inRadar) {
+            activeUsers.add(checksummed);
+            scheduleSaveUsers();
+          }
+          checkUsersBatch([checksummed]);
+        }
+      });
+    },
+    onError: () => {}
+  });
+
+  // 6. Üç paralel kademeli döngüyü birden başlat:
+  // - ultraCriticalSniperLoop: HF < 1.045 olanları 400 milisaniyede bir tarar.
   // - criticalSniperLoop: 1.045 <= HF <= 1.12 olanları 3 saniyede bir tarar.
   // - generalRadarLoop: Tüm veritabanını 25'erli Multicall paketleriyle tarar.
   logInfo(`Starting 3-tier Multicall radar loops. Monitoring ${activeUsers.size} addresses.`);
