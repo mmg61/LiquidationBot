@@ -8,7 +8,7 @@ dist/
 
 # Project Memory & Local Runtime Data
 PROJECT_MEMORY.md
-bot/data/monitored_users.json
+bot/data/*.json
 monitored_users.json
 
 # Foundry / Solidity

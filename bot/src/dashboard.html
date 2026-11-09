@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AAVE V3 ARBITRUM - TASFİYE BOTU YÖNETİM PANELİ</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg-canvas: #0f141c;
+      --bg-panel: #161d27;
+      --bg-panel-alt: #1c2532;
+      --bg-hover: #222d3d;
+      --border: #263244;
+      --border-strong: #35455d;
+      --text-primary: #e6edf3;
+      --text-secondary: #a3b3c9;
+      --text-muted: #70829c;
+      --accent-blue: #388bfd;
+      --accent-blue-bg: #162c4e;
+      --accent-blue-border: #254f8c;
+      --danger-text: #ff6b63;
+      --danger-bg: #36191d;
+      --danger-border: #6e2a30;
+      --warn-text: #e3aa36;
+      --warn-bg: #302410;
+      --warn-border: #664b19;
+      --success-text: #4ac26b;
+      --success-bg: #132d1d;
+      --success-border: #245e38;
+      --neutral-bg: #1e2736;
+      --neutral-border: #2f3d52;
+    }
+
+    body {
+      background-color: var(--bg-canvas);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    .mono {
+      font-family: "JetBrains Mono", Consolas, "Courier New", monospace;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* TOP BAR */
+    .topbar {
+      background-color: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 99px;
+      background-color: var(--success-text);
+      display: inline-block;
+    }
+
+    .status-dot.syncing {
+      background-color: var(--warn-text);
+    }
+
+    .brand-title {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      color: var(--text-primary);
+    }
+
+    .brand-subtitle {
+      font-size: 11px;
+      color: var(--text-muted);
+      border-left: 1px solid var(--border);
+      padding-left: 12px;
+    }
+
+    .topbar-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      background-color: var(--bg-panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 12px;
+    }
+
+    .meta-label {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    /* SCAN PROGRESS BAR */
+    .scan-banner {
+      background-color: var(--bg-panel-alt);
+      border-bottom: 1px solid var(--border);
+      padding: 9px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      font-size: 12px;
+    }
+
+    .progress-track {
+      flex: 1;
+      height: 8px;
+      background-color: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      max-width: 360px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background-color: var(--accent-blue);
+      border-radius: 99px;
+      width: 0%;
+      transition: width 0.25s ease;
+    }
+
+    /* MAIN CONTAINER */
+    .container {
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 20px 24px 44px 24px;
+    }
+
+    /* KPI GRID */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    @media (max-width: 1300px) {
+      .kpi-grid {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    @media (max-width: 768px) {
+      .kpi-grid {
+        grid-template-columns: repeat(1, 1fr);
+      }
+    }
+
+    .kpi-card {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 18px;
+    }
+
+    .kpi-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: 0.3px;
+      margin-bottom: 8px;
+    }
+
+    .kpi-value {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+
+    .kpi-sub {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    /* NAVIGATION TABS */
+    .nav-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .nav-tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 5px;
+    }
+
+    .nav-tab {
+      background-color: transparent;
+      color: var(--text-secondary);
+      border: 1px solid transparent;
+      border-radius: 7px;
+      padding: 8px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.2px;
+      transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .nav-tab:hover {
+      background-color: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .nav-tab.active {
+      background-color: var(--accent-blue-bg);
+      color: var(--text-primary);
+      border-color: var(--accent-blue-border);
+    }
+
+    /* BUTTONS & INPUTS */
+    .btn {
+      background-color: var(--bg-panel-alt);
+      color: var(--text-primary);
+      border: 1px solid var(--border-strong);
+      border-radius: 7px;
+      padding: 7px 13px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .btn:hover {
+      background-color: var(--bg-hover);
+      border-color: var(--accent-blue);
+    }
+
+    .btn-primary {
+      background-color: var(--accent-blue-bg);
+      border-color: var(--accent-blue-border);
+      color: var(--text-primary);
+    }
+
+    .btn-primary:hover {
+      background-color: #1c3863;
+    }
+
+    .btn-danger {
+      background-color: var(--danger-bg);
+      border-color: var(--danger-border);
+      color: var(--danger-text);
+    }
+
+    .btn-danger:hover {
+      background-color: #4a2025;
+      border-color: var(--danger-text);
+    }
+
+    .btn-sm {
+      padding: 5px 10px;
+      font-size: 11px;
+      border-radius: 6px;
+    }
+
+    .input-text, .select-box {
+      background-color: var(--bg-canvas);
+      color: var(--text-primary);
+      border: 1px solid var(--border-strong);
+      border-radius: 7px;
+      padding: 6px 11px;
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+
+    .input-text:focus, .select-box:focus {
+      border-color: var(--accent-blue);
+    }
+
+    /* PANEL SECTION */
+    .panel {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 22px;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      background-color: var(--bg-panel-alt);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .panel-title-group {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .panel-title {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      color: var(--text-primary);
+    }
+
+    .panel-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .filter-btn {
+      background-color: var(--bg-canvas);
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 6px 11px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .filter-btn:hover {
+      background-color: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .filter-btn.active {
+      background-color: var(--accent-blue-bg);
+      color: var(--text-primary);
+      border-color: var(--accent-blue-border);
+    }
+
+    /* TABLES */
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+
+    th {
+      background-color: var(--bg-panel-alt);
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    td {
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-primary);
+      font-size: 12px;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background-color: var(--bg-hover);
+    }
+
+    /* FLAT SOFT BADGES */
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      letter-spacing: 0.2px;
+    }
+
+    .badge-danger {
+      background-color: var(--danger-bg);
+      color: var(--danger-text);
+      border-color: var(--danger-border);
+    }
+
+    .badge-warn {
+      background-color: var(--warn-bg);
+      color: var(--warn-text);
+      border-color: var(--warn-border);
+    }
+
+    .badge-success {
+      background-color: var(--success-bg);
+      color: var(--success-text);
+      border-color: var(--success-border);
+    }
+
+    .badge-info {
+      background-color: var(--accent-blue-bg);
+      color: #79b8ff;
+      border-color: var(--accent-blue-border);
+    }
+
+    .badge-neutral {
+      background-color: var(--neutral-bg);
+      color: var(--text-secondary);
+      border-color: var(--neutral-border);
+    }
+
+    /* HEALTH FACTOR BAR */
+    .hf-cell {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .hf-bar-bg {
+      width: 68px;
+      height: 7px;
+      background-color: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+
+    .hf-bar-fill {
+      height: 100%;
+      border-radius: 99px;
+    }
+
+    /* LINKS */
+    a.ext-link {
+      color: #79b8ff;
+      text-decoration: none;
+    }
+
+    a.ext-link:hover {
+      text-decoration: underline;
+    }
+
+    .empty-row {
+      text-align: center;
+      padding: 32px !important;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    /* MODAL FOR POSITION DETAILS */
+    .modal-backdrop {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: rgba(8, 11, 16, 0.82);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 20px;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal-box {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border-strong);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 840px;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+
+    .modal-header {
+      background-color: var(--bg-panel-alt);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .modal-body {
+      padding: 18px;
+    }
+
+    .split-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 12px;
+    }
+
+    @media (max-width: 700px) {
+      .split-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- TOP HEADER BAR -->
+  <header class="topbar">
+    <div class="brand-group">
+      <span id="statusDot" class="status-dot"></span>
+      <span class="brand-title">AAVE V3 ARBITRUM // TASFİYE BOTU KONTROL PANELİ</span>
+      <span class="brand-subtitle">YEREL YÖNETİM ARAYÜZÜ (127.0.0.1)</span>
+    </div>
+
+    <div class="topbar-meta">
+      <div class="meta-item">
+        <span class="meta-label">BLOK:</span>
+        <span id="metaBlock" class="mono">---</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">BOT KONTRATI:</span>
+        <span id="metaContract" class="mono">---</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">OPERATÖR CÜZDAN:</span>
+        <span id="metaWallet" class="mono">---</span>
+      </div>
+      <div class="meta-item">
+        <span class="meta-label">GAS BAKİYESİ:</span>
+        <span id="metaEthBalance" class="mono">---</span>
+      </div>
+      <button class="btn btn-primary" onclick="triggerManualRefresh()">VERİLERİ YENİLE</button>
+      <button class="btn btn-danger" onclick="shutdownServer()">PANELİ KAPAT</button>
+    </div>
+  </header>
+
+  <!-- PROGRESS BANNER -->
+  <div class="scan-banner">
+    <div>
+      <span style="color: var(--text-muted); font-weight: 700; margin-right: 8px;">SİSTEM DURUMU:</span>
+      <span id="scanStatusText" class="mono">Blokzincir verileri okunuyor...</span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <div class="progress-track">
+        <div id="scanProgressBar" class="progress-fill"></div>
+      </div>
+      <span id="scanProgressPct" class="mono" style="min-width: 42px; text-align: right;">0%</span>
+      <span id="lastUpdatedText" class="mono" style="color: var(--text-muted);">Son Güncelleme: --:--:--</span>
+    </div>
+  </div>
+
+  <!-- MAIN CONTENT -->
+  <main class="container">
+
+    <!-- 6 KPI CARDS -->
+    <section class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">İZLENEN BORÇLU CÜZDAN</div>
+        <div id="kpiTotalMonitored" class="kpi-value mono">0</div>
+        <div id="kpiScannedInfo" class="kpi-sub mono">Aktif Borçlu (&gt;$50): 0</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">ULTRA-KRİTİK HEDEF (HF &lt; 1.045)</div>
+        <div id="kpiUltraCritical" class="kpi-value mono" style="color: var(--danger-text);">0</div>
+        <div id="kpiLowestHf" class="kpi-sub mono">En Düşük HF: ---</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">KRİTİK RADAR (1.045 - 1.12)</div>
+        <div id="kpiCritical" class="kpi-value mono" style="color: var(--warn-text);">0</div>
+        <div id="kpiCriticalDebt" class="kpi-sub mono">Riskli Borç Hacmi: $0</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">SON 7 GÜN AĞ TASFİYESİ</div>
+        <div id="kpiLiqTotal7d" class="kpi-value mono">0</div>
+        <div id="kpiLiqVolume7d" class="kpi-sub mono">Toplam Kapatılan: $0</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">GERÇEK FIRSATLAR (&gt;$25 FARKLI TOKEN)</div>
+        <div id="kpiLiqProfitable7d" class="kpi-value mono" style="color: #79b8ff;">0</div>
+        <div id="kpiLiqDust7d" class="kpi-sub mono">Toz / Aynı Token: 0</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">BOT MÜDAHALE / VURUŞ SAYISI</div>
+        <div id="kpiOurStrikes" class="kpi-value mono" style="color: var(--success-text);">0</div>
+        <div id="kpiInOurRadarCount" class="kpi-sub mono">Radarımızda Olan Tasfiye: 0</div>
+      </div>
+    </section>
+
+    <!-- NAVIGATION TABS -->
+    <div class="nav-bar">
+      <div class="nav-tabs">
+        <button class="nav-tab active" onclick="switchTab('all', this)">GENEL GÖRÜNÜM (TÜMÜ)</button>
+        <button class="nav-tab" onclick="switchTab('borrowers', this)">AKTİF BORÇLU RADARI VE POZİSYONLAR</button>
+        <button class="nav-tab" onclick="switchTab('liquidations', this)">SON 7 GÜN TASFİYE VE BOT ANALİZİ</button>
+        <button class="nav-tab" onclick="switchTab('liveborrows', this)">ANLIK YENİ BORÇLANMALAR (CANLI)</button>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn btn-sm" onclick="triggerDeepBorrowerSync()">AĞDAN YENİ BORÇLULARI TARA (+35,000 BLOK)</button>
+        <button class="btn btn-sm" onclick="triggerRescanLiquidations()">7 GÜNLÜK TASFİYELERİ YENİDEN TARA</button>
+      </div>
+    </div>
+
+    <!-- SECTION 1: SON 7 GÜN TASFİYE GEÇMİŞİ VE BOT MÜDAHALE ANALİZİ -->
+    <section id="secLiquidations" class="panel">
+      <div class="panel-header">
+        <div class="panel-title-group">
+          <div class="panel-title">SON 7 GÜNLÜK AAVE V3 TASFİYE GEÇMİŞİ VE BOT MÜDAHALE ANALİZİ</div>
+          <div class="panel-desc">Arbitrum Aave V3 havuzunda son 7 günde (~2.4 milyon blok) gerçekleşen tüm tasfiyeler, radar durumu ve botun müdahale analizi</div>
+        </div>
+        <div class="filter-bar">
+          <button class="filter-btn active" onclick="setLiqFilter('all', this)">TÜMÜ</button>
+          <button class="filter-btn" onclick="setLiqFilter('profitable', this)">KÂRLI FIRSATLAR (&gt;=$25)</button>
+          <button class="filter-btn" onclick="setLiqFilter('dust', this)">TOZ BAKİYELER (&lt;$25)</button>
+          <button class="filter-btn" onclick="setLiqFilter('inradar', this)">RADARIMIZDA OLANLAR</button>
+          <button class="filter-btn" onclick="setLiqFilter('ours', this)">BOTUMUZUN VURDUKLARI</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>TARİH / SAAT</th>
+              <th>BLOK</th>
+              <th>TASFİYE OLAN CÜZDAN</th>
+              <th>KAPATILAN BORÇ</th>
+              <th>ALINAN TEMİNAT</th>
+              <th>TAHMİNİ PRİM</th>
+              <th>TASFİYE EDEN (LIQUIDATOR)</th>
+              <th>RADARDA MIYDI</th>
+              <th>BOT MÜDAHALE DURUMU &amp; TEKNİK AÇIKLAMA</th>
+              <th>İŞLEM</th>
+            </tr>
+          </thead>
+          <tbody id="liqTableBody">
+            <tr><td colspan="10" class="empty-row">Son 7 günlük tasfiye kayıtları blokzincirden taranıyor...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- SECTION 2: ANLIK BORÇLANMA ALANLAR VE AKTİF BORÇLU RADARI -->
+    <section id="secBorrowers" class="panel">
+      <div class="panel-header">
+        <div class="panel-title-group">
+          <div class="panel-title">AKTİF BORÇLU RADARI (CANLI POZİSYONLAR VE SAĞLIK FAKTÖRLERİ)</div>
+          <div class="panel-desc">İzlenen cüzdanların anlık Aave V3 teminat, borç ve Sağlık Faktörü (Health Factor) verileri</div>
+        </div>
+        <div class="filter-bar">
+          <input id="borrowerSearchInput" type="text" class="input-text mono" placeholder="Cüzdan ara (0x...)" oninput="renderBorrowersTable()" style="width: 200px;" />
+          <select id="borrowerSortSelect" class="select-box" onchange="renderBorrowersTable()">
+            <option value="hf_asc">SIRALA: EN DÜŞÜK HF (EN RİSKLİ ÜSTTE)</option>
+            <option value="debt_desc">SIRALA: EN YÜKSEK BORÇ ($) ÜSTTE</option>
+            <option value="col_desc">SIRALA: EN YÜKSEK TEMİNAT ($) ÜSTTE</option>
+          </select>
+          <button class="filter-btn active" onclick="setBorrowerFilter('all', this)">AKTİF BORÇLULAR (&gt;$50)</button>
+          <button class="filter-btn" onclick="setBorrowerFilter('ultracritical', this)">ULTRA-KRİTİK (HF &lt; 1.045)</button>
+          <button class="filter-btn" onclick="setBorrowerFilter('critical', this)">KRİTİK (1.045 - 1.12)</button>
+          <button class="filter-btn" onclick="setBorrowerFilter('whales', this)">BALİNALAR (&gt;$10,000)</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>RİSK KADEMESİ</th>
+              <th>BORÇLU CÜZDAN ADRESİ</th>
+              <th>SAĞLIK FAKTÖRÜ (HF)</th>
+              <th>TOPLAM BORÇ (USD)</th>
+              <th>TOPLAM TEMİNAT (USD)</th>
+              <th>NET ÖZSERMAYE (USD)</th>
+              <th>TASFİYE EŞİĞİ / LTV</th>
+              <th>TASFİYEYE KALAN DÜŞÜŞ</th>
+              <th>İNCELE</th>
+            </tr>
+          </thead>
+          <tbody id="borrowersTableBody">
+            <tr><td colspan="9" class="empty-row">Borçlu pozisyonları Multicall3 ile yükleniyor...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- SECTION 3: AĞDAKİ ANLIK YENİ BORÇLANMA İŞLEMLERİ (CANLI BORROW AKIŞI) -->
+    <section id="secLiveBorrows" class="panel">
+      <div class="panel-header">
+        <div class="panel-title-group">
+          <div class="panel-title">ANLIK BORÇLANMA ALANLAR (AAVE V3 CANLI BORROW İŞLEMLERİ)</div>
+          <div class="panel-desc">Arbitrum Aave V3 havuzunda son bloklarda gerçekleşen ve canlı akan yeni kredi çekim işlemleri</div>
+        </div>
+        <div class="filter-bar">
+          <span class="mono" style="color: var(--text-muted); font-size: 11px;">Her yeni borçlanma otomatik olarak yerel radara kaydedilir</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>TARİH / SAAT</th>
+              <th>BLOK</th>
+              <th>BORÇ ALAN CÜZDAN</th>
+              <th>ÇEKİLEN VARLIK &amp; MİKTAR</th>
+              <th>ÇEKİLEN DEĞER (USD)</th>
+              <th>FAİZ TİPİ</th>
+              <th>CÜZDAN TOPLAM BORCU</th>
+              <th>CÜZDAN GÜNCEL HF</th>
+              <th>RADAR DURUMU</th>
+              <th>DETAY / TX</th>
+            </tr>
+          </thead>
+          <tbody id="liveBorrowsTableBody">
+            <tr><td colspan="10" class="empty-row">Son bloklardaki borçlanma işlemleri okunuyor...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- MODAL: CÜZDAN VARLIK DETAYI -->
+  <div id="userModal" class="modal-backdrop" onclick="if(event.target===this) closeUserModal()">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div>
+          <div class="panel-title">CÜZDAN POZİSYON VE REZERV DETAYI</div>
+          <div id="modalUserAddress" class="mono" style="font-size: 12px; color: #79b8ff; margin-top: 2px;">0x...</div>
+        </div>
+        <button class="btn btn-sm" onclick="closeUserModal()">KAPAT [ESC]</button>
+      </div>
+      <div id="modalBodyContent" class="modal-body">
+        Veriler yükleniyor...
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let appState = {
+      meta: {},
+      scanProgress: { liqPct: 0, borrowerPct: 0, statusText: '' },
+      liquidations: [],
+      borrowers: [],
+      liveBorrows: []
+    };
+
+    let currentTab = 'all';
+    let currentLiqFilter = 'all';
+    let currentBorrowerFilter = 'all';
+
+    function formatUSD(val) {
+      if (val === undefined || val === null || isNaN(val)) return '$0.00';
+      return '$' + Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function formatNum(val, dec = 4) {
+      if (val === undefined || val === null || isNaN(val)) return '0';
+      return Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: dec });
+    }
+
+    function shortAddr(addr) {
+      if (!addr || addr.length < 12) return addr || '---';
+      return addr.slice(0, 6) + '...' + addr.slice(-4);
+    }
+
+    function formatDate(tsMs) {
+      if (!tsMs) return '---';
+      const d = new Date(tsMs);
+      const pad = n => String(n).padStart(2, '0');
+      return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+
+    function switchTab(tab, btn) {
+      currentTab = tab;
+      document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+
+      const secLiq = document.getElementById('secLiquidations');
+      const secBor = document.getElementById('secBorrowers');
+      const secLive = document.getElementById('secLiveBorrows');
+
+      if (tab === 'all') {
+        secLiq.classList.remove('hidden');
+        secBor.classList.remove('hidden');
+        secLive.classList.remove('hidden');
+      } else if (tab === 'borrowers') {
+        secLiq.classList.add('hidden');
+        secBor.classList.remove('hidden');
+        secLive.classList.add('hidden');
+      } else if (tab === 'liquidations') {
+        secLiq.classList.remove('hidden');
+        secBor.classList.add('hidden');
+        secLive.classList.add('hidden');
+      } else if (tab === 'liveborrows') {
+        secLiq.classList.add('hidden');
+        secBor.classList.add('hidden');
+        secLive.classList.remove('hidden');
+      }
+    }
+
+    function setLiqFilter(f, btn) {
+      currentLiqFilter = f;
+      btn.parentElement.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderLiquidationsTable();
+    }
+
+    function setBorrowerFilter(f, btn) {
+      currentBorrowerFilter = f;
+      btn.parentElement.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderBorrowersTable();
+    }
+
+    function getHfBadge(hf) {
+      if (!hf || hf > 100) return `<span class="badge badge-neutral mono">BORÇ YOK</span>`;
+      if (hf < 1.0) return `<span class="badge badge-danger mono">${hf.toFixed(4)} [TASFİYE]</span>`;
+      if (hf < 1.045) return `<span class="badge badge-danger mono">${hf.toFixed(4)}</span>`;
+      if (hf <= 1.12) return `<span class="badge badge-warn mono">${hf.toFixed(4)}</span>`;
+      return `<span class="badge badge-success mono">${hf.toFixed(4)}</span>`;
+    }
+
+    function getTierBadge(hf) {
+      if (hf < 1.0) return `<span class="badge badge-danger">TASFİYE (&lt;1.00)</span>`;
+      if (hf < 1.045) return `<span class="badge badge-danger">ULTRA-KRİTİK (250ms)</span>`;
+      if (hf <= 1.12) return `<span class="badge badge-warn">KRİTİK (2.5sn)</span>`;
+      return `<span class="badge badge-neutral">GENEL RADAR (15sn)</span>`;
+    }
+
+    function renderTopAndKpis() {
+      const m = appState.meta || {};
+      document.getElementById('metaBlock').textContent = m.currentBlock ? Number(m.currentBlock).toLocaleString('en-US') : '---';
+      document.getElementById('metaContract').innerHTML = m.botContract
+        ? `<a class="ext-link" target="_blank" href="https://arbiscan.io/address/${m.botContract}">${shortAddr(m.botContract)}</a>`
+        : '---';
+      document.getElementById('metaWallet').innerHTML = m.walletAddress
+        ? `<a class="ext-link" target="_blank" href="https://arbiscan.io/address/${m.walletAddress}">${shortAddr(m.walletAddress)}</a>`
+        : '---';
+      document.getElementById('metaEthBalance').textContent = m.ethBalance !== undefined
+        ? `${Number(m.ethBalance).toFixed(5)} ETH (${formatUSD(m.ethBalanceUSD || 0)})`
+        : '---';
+
+      const prog = appState.scanProgress || {};
+      const totalPct = Math.round(((prog.liqPct || 0) + (prog.borrowerPct || 0)) / 2);
+      document.getElementById('scanStatusText').textContent = prog.statusText || 'Hazır';
+      document.getElementById('scanProgressBar').style.width = `${totalPct}%`;
+      document.getElementById('scanProgressPct').textContent = `${totalPct}%`;
+
+      const dot = document.getElementById('statusDot');
+      if (totalPct < 100) {
+        dot.classList.add('syncing');
+      } else {
+        dot.classList.remove('syncing');
+      }
+
+      if (m.lastUpdated) {
+        const d = new Date(m.lastUpdated);
+        document.getElementById('lastUpdatedText').textContent = `Son Güncelleme: ${d.toTimeString().split(' ')[0]}`;
+      }
+
+      const borrowers = appState.borrowers || [];
+      const activeOver50 = borrowers.filter(b => b.totalDebtUSD >= 50);
+      const ultraList = activeOver50.filter(b => b.healthFactor > 0 && b.healthFactor < 1.045);
+      const critList = activeOver50.filter(b => b.healthFactor >= 1.045 && b.healthFactor <= 1.12);
+      const critDebtSum = [...ultraList, ...critList].reduce((acc, b) => acc + b.totalDebtUSD, 0);
+
+      let lowestHf = null;
+      for (const b of activeOver50) {
+        if (b.healthFactor > 0 && (lowestHf === null || b.healthFactor < lowestHf)) {
+          lowestHf = b.healthFactor;
+        }
+      }
+
+      document.getElementById('kpiTotalMonitored').textContent = (m.totalMonitoredCount || borrowers.length).toLocaleString('en-US');
+      document.getElementById('kpiScannedInfo').textContent = `Taranan: ${borrowers.length} | Aktif (>$50): ${activeOver50.length}`;
+      document.getElementById('kpiUltraCritical').textContent = ultraList.length;
+      document.getElementById('kpiLowestHf').textContent = lowestHf ? `En Düşük HF: ${lowestHf.toFixed(4)}` : 'En Düşük HF: ---';
+      document.getElementById('kpiCritical').textContent = critList.length;
+      document.getElementById('kpiCriticalDebt').textContent = `Riskli Borç: ${formatUSD(critDebtSum)}`;
+
+      const liqs = appState.liquidations || [];
+      const totalLiqVol = liqs.reduce((acc, x) => acc + (x.debtUSD || 0), 0);
+      const profitableLiqs = liqs.filter(x => x.isRealOpportunity);
+      const dustLiqs = liqs.length - profitableLiqs.length;
+      const ourStrikes = liqs.filter(x => x.botStatusCode === 'OUR_BOT');
+      const inRadarLiqs = liqs.filter(x => x.wasInRadar);
+
+      document.getElementById('kpiLiqTotal7d').textContent = liqs.length;
+      document.getElementById('kpiLiqVolume7d').textContent = `Toplam Hacim: ${formatUSD(totalLiqVol)}`;
+      document.getElementById('kpiLiqProfitable7d').textContent = profitableLiqs.length;
+      document.getElementById('kpiLiqDust7d').textContent = `Toz (<$25) veya Aynı Token: ${dustLiqs}`;
+      document.getElementById('kpiOurStrikes').textContent = ourStrikes.length;
+      document.getElementById('kpiInOurRadarCount').textContent = `Radarımızda Olan Tasfiye: ${inRadarLiqs.length}`;
+    }
+
+    function renderLiquidationsTable() {
+      const tbody = document.getElementById('liqTableBody');
+      let list = (appState.liquidations || []).slice();
+
+      if (currentLiqFilter === 'profitable') {
+        list = list.filter(x => x.isRealOpportunity);
+      } else if (currentLiqFilter === 'dust') {
+        list = list.filter(x => !x.isRealOpportunity);
+      } else if (currentLiqFilter === 'inradar') {
+        list = list.filter(x => x.wasInRadar);
+      } else if (currentLiqFilter === 'ours') {
+        list = list.filter(x => x.botStatusCode === 'OUR_BOT');
+      }
+
+      if (list.length === 0) {
+        const scanning = (appState.scanProgress?.liqPct || 0) < 100;
+        tbody.innerHTML = `<tr><td colspan="10" class="empty-row">${
+          scanning
+            ? 'Blokzincir taranıyor, bulunan tasfiyeler anında buraya eklenecek...'
+            : 'Seçilen filtreye uygun tasfiye kaydı bulunamadı.'
+        }</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = list.map(item => {
+        let statusBadge = '';
+        if (item.botStatusCode === 'OUR_BOT') {
+          statusBadge = `<span class="badge badge-success">BOTUMUZ VURDU</span>`;
+        } else if (item.botStatusCode === 'SKIPPED_DUST') {
+          statusBadge = `<span class="badge badge-neutral">PAS GEÇİLDİ: TOZ BAKİYE (&lt;$25)</span>`;
+        } else if (item.botStatusCode === 'SKIPPED_SAME_TOKEN') {
+          statusBadge = `<span class="badge badge-neutral">PAS GEÇİLDİ: AYNI TOKEN</span>`;
+        } else if (item.botStatusCode === 'UNSUPPORTED_TOKEN') {
+          statusBadge = `<span class="badge badge-warn">LİSTE DIŞI REZERV</span>`;
+        } else if (item.botStatusCode === 'NOT_IN_RADAR') {
+          statusBadge = `<span class="badge badge-warn">RADAR DIŞI CÜZDAN</span>`;
+        } else {
+          statusBadge = `<span class="badge badge-danger">RAKİP BOT ÖNCE VURDU</span>`;
+        }
+
+        const radarBadge = item.wasInRadar
+          ? `<span class="badge badge-info">EVET</span>`
+          : `<span class="badge badge-neutral">HAYIR</span>`;
+
+        const bonusColor = item.bonusUSD >= 1.0 ? 'var(--success-text)' : 'var(--text-muted)';
+
+        return `
+          <tr>
+            <td class="mono">${formatDate(item.timestampMs)}</td>
+            <td class="mono"><a class="ext-link" target="_blank" href="https://arbiscan.io/block/${item.blockNumber}">${item.blockNumber}</a></td>
+            <td class="mono">
+              <a class="ext-link" target="_blank" href="https://arbiscan.io/address/${item.user}">${shortAddr(item.user)}</a>
+              <button class="btn btn-sm" style="margin-left:6px;" onclick="openUserModal('${item.user}')">DETAY</button>
+            </td>
+            <td class="mono">
+              <strong>${formatNum(item.debtAmountFormatted, 4)} ${item.debtSymbol}</strong>
+              <div style="font-size:11px; color:var(--text-secondary);">${formatUSD(item.debtUSD)}</div>
+            </td>
+            <td class="mono">
+              <strong>${formatNum(item.collateralAmountFormatted, 4)} ${item.collateralSymbol}</strong>
+              <div style="font-size:11px; color:var(--text-secondary);">${formatUSD(item.collateralUSD)}</div>
+            </td>
+            <td class="mono" style="color:${bonusColor}; font-weight:700;">
+              ${item.bonusUSD >= 0 ? '+' : ''}${formatUSD(item.bonusUSD)}
+            </td>
+            <td class="mono">
+              <a class="ext-link" target="_blank" href="https://arbiscan.io/address/${item.liquidator}">${shortAddr(item.liquidator)}</a>
+            </td>
+            <td>${radarBadge}</td>
+            <td>
+              <div>${statusBadge}</div>
+              <div style="font-size:11px; color:var(--text-secondary); margin-top:3px;">${item.botReasonText}</div>
+            </td>
+            <td class="mono">
+              <a class="ext-link" target="_blank" href="https://arbiscan.io/tx/${item.txHash}">TX İNCELE</a>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderBorrowersTable() {
+      const tbody = document.getElementById('borrowersTableBody');
+      const search = (document.getElementById('borrowerSearchInput').value || '').trim().toLowerCase();
+      const sortMode = document.getElementById('borrowerSortSelect').value;
+
+      let list = (appState.borrowers || []).filter(b => b.totalDebtUSD >= 50);
+
+      if (currentBorrowerFilter === 'ultracritical') {
+        list = list.filter(b => b.healthFactor > 0 && b.healthFactor < 1.045);
+      } else if (currentBorrowerFilter === 'critical') {
+        list = list.filter(b => b.healthFactor >= 1.045 && b.healthFactor <= 1.12);
+      } else if (currentBorrowerFilter === 'whales') {
+        list = list.filter(b => b.totalDebtUSD >= 10000);
+      }
+
+      if (search) {
+        list = list.filter(b => b.address.toLowerCase().includes(search));
+      }
+
+      list.sort((a, b) => {
+        if (sortMode === 'debt_desc') return b.totalDebtUSD - a.totalDebtUSD;
+        if (sortMode === 'col_desc') return b.totalCollateralUSD - a.totalCollateralUSD;
+        return a.healthFactor - b.healthFactor;
+      });
+
+      const displayList = list.slice(0, 250);
+
+      if (displayList.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="9" class="empty-row">Seçilen kritere uygun aktif borçlu bulunamadı.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = displayList.map(b => {
+        const netWorth = Math.max(0, b.totalCollateralUSD - b.totalDebtUSD);
+        const dropNeededPct = b.healthFactor > 1.0
+          ? ((1 - (1 / b.healthFactor)) * 100).toFixed(2) + '%'
+          : '0.00% [TASFİYE]';
+
+        const barPct = Math.min(100, Math.max(5, Math.round((1 / Math.max(1, b.healthFactor)) * 100)));
+        const barColor = b.healthFactor < 1.045
+          ? 'var(--danger-text)'
+          : (b.healthFactor <= 1.12 ? 'var(--warn-text)' : 'var(--success-text)');
+
+        return `
+          <tr>
+            <td>${getTierBadge(b.healthFactor)}</td>
+            <td class="mono">
+              <a class="ext-link" target="_blank" href="https://arbiscan.io/address/${b.address}">${b.address}</a>
+            </td>
+            <td>
+              <div class="hf-cell">
+                ${getHfBadge(b.healthFactor)}
+                <div class="hf-bar-bg">
+                  <div class="hf-bar-fill" style="width:${barPct}%; background-color:${barColor};"></div>
+                </div>
+              </div>
+            </td>
+            <td class="mono" style="font-weight:700;">${formatUSD(b.totalDebtUSD)}</td>
+            <td class="mono">${formatUSD(b.totalCollateralUSD)}</td>
+            <td class="mono" style="color:var(--text-secondary);">${formatUSD(netWorth)}</td>
+            <td class="mono" style="color:var(--text-secondary);">${b.liquidationThresholdPct}% / ${b.ltvPct}%</td>
+            <td class="mono" style="color:${b.healthFactor < 1.05 ? 'var(--danger-text)' : 'var(--text-secondary)'}; font-weight:600;">
+              -${dropNeededPct}
+            </td>
+            <td>
+              <button class="btn btn-sm" onclick="openUserModal('${b.address}')">VARLIKLARI GÖSTER</button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderLiveBorrowsTable() {
+      const tbody = document.getElementById('liveBorrowsTableBody');
+      const list = appState.liveBorrows || [];
+
+      if (list.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="10" class="empty-row">Son bloklarda yeni borçlanma olayı bekleniyor...</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = list.map(ev => {
+        const rateLabel = Number(ev.interestRateMode) === 2
+          ? `<span class="badge badge-neutral">DEĞİŞKEN</span>`
+          : `<span class="badge badge-info">SABİT</span>`;
+
+        return `
+          <tr>
+            <td class="mono">${formatDate(ev.timestampMs)}</td>
+            <td class="mono"><a class="ext-link" target="_blank" href="https://arbiscan.io/block/${ev.blockNumber}">${ev.blockNumber}</a></td>
+            <td class="mono">
+              <a class="ext-link" target="_blank" href="https://arbiscan.io/address/${ev.user}">${shortAddr(ev.user)}</a>
+            </td>
+            <td class="mono"><strong>${formatNum(ev.amountFormatted, 4)} ${ev.assetSymbol}</strong></td>
+            <td class="mono" style="font-weight:700;">${formatUSD(ev.amountUSD)}</td>
+            <td>${rateLabel}</td>
+            <td class="mono">${formatUSD(ev.userTotalDebtUSD)}</td>
+            <td>${getHfBadge(ev.userHealthFactor)}</td>
+            <td><span class="badge badge-success">RADARDA KAYITLI</span></td>
+            <td class="mono">
+              <button class="btn btn-sm" onclick="openUserModal('${ev.user}')">POZİSYON</button>
+              <a class="ext-link" style="margin-left:6px;" target="_blank" href="https://arbiscan.io/tx/${ev.txHash}">TX</a>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function fetchState() {
+      try {
+        const res = await fetch('/api/state');
+        if (!res.ok) return;
+        appState = await res.json();
+        renderTopAndKpis();
+        renderLiquidationsTable();
+        renderBorrowersTable();
+        renderLiveBorrowsTable();
+      } catch (e) {
+        console.error('State fetch error:', e);
+      }
+    }
+
+    async function triggerManualRefresh() {
+      await fetch('/api/refresh', { method: 'POST' });
+      await fetchState();
+    }
+
+    async function triggerDeepBorrowerSync() {
+      await fetch('/api/sync-borrowers', { method: 'POST' });
+      await fetchState();
+    }
+
+    async function triggerRescanLiquidations() {
+      await fetch('/api/rescan-liquidations', { method: 'POST' });
+      await fetchState();
+    }
+
+    async function shutdownServer() {
+      if (!confirm('Arka planda çalışan yerel panel sunucusunu kapatmak istiyor musunuz?')) return;
+      try {
+        await fetch('/api/shutdown', { method: 'POST' });
+      } catch {}
+      document.body.innerHTML = `<div style="padding:60px; text-align:center; color:var(--text-secondary);" class="mono">YEREL YÖNETİM PANELİ KAPATILDI. Tekrar açmak için baslat-panel.bat dosyasını çalıştırabilirsiniz.</div>`;
+    }
+
+    async function openUserModal(address) {
+      const modal = document.getElementById('userModal');
+      const addrEl = document.getElementById('modalUserAddress');
+      const bodyEl = document.getElementById('modalBodyContent');
+      addrEl.textContent = address;
+      bodyEl.innerHTML = `<div class="mono" style="padding:20px; color:var(--text-secondary);">11 Aave V3 rezerv varlığı Multicall3 ile sorgulanıyor...</div>`;
+      modal.classList.add('open');
+
+      try {
+        const res = await fetch(`/api/user-details?address=${encodeURIComponent(address)}`);
+        const data = await res.json();
+
+        const colRows = (data.collaterals || []).map(c => `
+          <tr>
+            <td class="mono"><strong>${c.name}</strong></td>
+            <td class="mono">${formatNum(c.amount, 6)}</td>
+            <td class="mono">${formatUSD(c.priceUSD)}</td>
+            <td class="mono" style="font-weight:700;">${formatUSD(c.usd)}</td>
+          </tr>
+        `).join('') || `<tr><td colspan="4" class="empty-row">Aktif teminat bulunamadı ($0)</td></tr>`;
+
+        const debtRows = (data.debts || []).map(d => `
+          <tr>
+            <td class="mono"><strong>${d.name}</strong></td>
+            <td class="mono">${formatNum(d.amount, 6)}</td>
+            <td class="mono">${formatUSD(d.priceUSD)}</td>
+            <td class="mono" style="font-weight:700; color:var(--danger-text);">${formatUSD(d.usd)}</td>
+          </tr>
+        `).join('') || `<tr><td colspan="4" class="empty-row">Aktif borç bulunamadı ($0)</td></tr>`;
+
+        bodyEl.innerHTML = `
+          <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px;">
+            <div class="meta-item"><span class="meta-label">SAĞLIK FAKTÖRÜ:</span> <span class="mono">${data.healthFactor > 100 ? 'BORÇ YOK' : data.healthFactor.toFixed(4)}</span></div>
+            <div class="meta-item"><span class="meta-label">TOPLAM BORÇ:</span> <span class="mono">${formatUSD(data.totalDebtUSD)}</span></div>
+            <div class="meta-item"><span class="meta-label">TOPLAM TEMİNAT:</span> <span class="mono">${formatUSD(data.totalCollateralUSD)}</span></div>
+            <div class="meta-item"><span class="meta-label">ARBISCAN:</span> <a class="ext-link mono" target="_blank" href="https://arbiscan.io/address/${address}">Cüzdanı Aç</a></div>
+          </div>
+
+          <div class="split-grid">
+            <div class="panel" style="margin-bottom:0;">
+              <div class="panel-header"><div class="panel-title">TEMİNAT VARLIKLARI (COLLATERAL)</div></div>
+              <table>
+                <thead><tr><th>VARLIK</th><th>MİKTAR</th><th>FİYAT</th><th>DEĞER (USD)</th></tr></thead>
+                <tbody>${colRows}</tbody>
+              </table>
+            </div>
+
+            <div class="panel" style="margin-bottom:0;">
+              <div class="panel-header"><div class="panel-title">BORÇ VARLIKLARI (DEBT)</div></div>
+              <table>
+                <thead><tr><th>VARLIK</th><th>MİKTAR</th><th>FİYAT</th><th>DEĞER (USD)</th></tr></thead>
+                <tbody>${debtRows}</tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      } catch (err) {
+        bodyEl.innerHTML = `<div class="mono" style="color:var(--danger-text);">Hata: Cüzdan detayları alınamadı.</div>`;
+      }
+    }
+
+    function closeUserModal() {
+      document.getElementById('userModal').classList.remove('open');
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') closeUserModal();
+    });
+
+    fetchState();
+    setInterval(fetchState, 3000);
+  </script>
+</body>
+</html>

@@ -10,7 +10,7 @@ Aave protokolü, bu riskli pozisyonları kapatan kullanıcılara indirimli temin
 
 ## Sistemin İşleyiş Mantığı
 
-Sistem iki ana bileşenin uyum içinde çalışmasıyla işler:
+Sistem üç ana bileşenin uyum içinde çalışmasıyla işler:
 
 ### 1. İzleme ve Karar Katmanı (TypeScript)
 
@@ -18,8 +18,8 @@ Blokzincir üzerindeki verileri sürekli takip eden ve tetikleme kararını vere
 
 - Kalıcı Borçlu Radarı: Sistem daha önce borç almış kullanıcıları yerel veri tabanında saklar. Ayrıca ağdaki yeni borçlanma işlemlerini canlı olarak dinleyerek listeye otomatik olarak ekler.
 - Üç Kademeli Keskin Nişancı Taraması:
-  - Ultra-Kritik Radar: Sağlık Faktörü 1.045 seviyesinin altına inmiş (tasfiyeye çok yakın) kullanıcılar her 1 saniyede bir kontrol edilir.
-  - Kritik Radar: Sağlık Faktörü 1.045 ile 1.12 arasında olan riskli kullanıcılar her 3 saniyede bir kontrol edilir.
+  - Ultra-Kritik Radar: Sağlık Faktörü 1.045 seviyesinin altına inmiş (tasfiyeye çok yakın) kullanıcılar çoklu RPC havuzu üzerinden her 250 milisaniyede bir (Arbitrum blok hızında) kontrol edilir.
+  - Kritik Radar: Sağlık Faktörü 1.045 ile 1.12 arasında olan riskli kullanıcılar her 2.5 saniyede bir kontrol edilir.
   - Genel Radar: Diğer tüm kayıtlı kullanıcılar düzenli aralıklarla kontrol edilir ve sağlık durumu bozulanlar anında üst kademelere taşınır.
 - Toplu Sorgulama (Multicall3): Yüzlerce cüzdanın durumu tek tek sorgulanmak yerine tek bir istek paketi içinde blokzincirden okunur. Bu yaklaşım hem sorgu limitlerine takılmayı önler hem de hızı artırır.
 - Otomatik Kârlılık, Çoklu Çift ve Kısmi Tasfiye Seçimi: Aave Fiyat Kâhini (Oracle) ve veri sağlayıcısı üzerinden borçlunun tüm borç ve teminatları değerlendirilir. En yüksek getiriyi sağlayacak aday borç-teminat eşleşmeleri ve kısmi tasfiye oranları dinamik olarak belirlenir.
@@ -36,19 +36,31 @@ Tasfiye adımını blokzincir üzerinde tek bir işlem içinde (atomik olarak) t
 - Kredi İadesi ve Güvenlik Kontrolü: Flaş kredinin anapara ve faiz tutarı Aave protokolüne geri ödenir. Eğer yapılan satış borcu ve masrafları karşılamaya yetmiyorsa işlem baştan iptal edilir.
 - Anında Kâr Aktarımı: Masraflar ödendikten sonra kalan net kâr sözleşmede bekletilmez; doğrudan sözleşme sahibinin cüzdanına gönderilir.
 
+### 3. Web Tabanlı İzleme ve Yönetim Paneli
+
+Botun durumunu ve piyasa hareketlerini tarayıcı üzerinden grafiksel olarak takip etmeyi sağlayan yerel web arayüzüdür:
+
+- Gerçek Zamanlı Sistem Durumu: Bot cüzdan bakiyesi, sözleşme adresi, ağ gecikmesi ve blok verilerini anlık olarak gösterir.
+- Canlı Borçlu Listesi: İzlenen borçluların Sağlık Faktörü, toplam borç ve teminat dağılımlarını risk durumuna göre listeler.
+- Canlı Olay Akışı: Sistemin arka planda gerçekleştirdiği taramaları, simülasyon sonuçlarını ve tespit edilen tasfiye fırsatlarını arayüze yansıtır.
+- Manuel Sorgulama ve Ekleme: Belirli bir cüzdan adresinin anlık borç durumunu tek tıkla sorgulama ve radara ekleme olanağı verir.
+
 ## Temel Özellikler
 
 - Sıfır Sermaye Gereksinimi: Flaş Kredi kullanımı sayesinde kullanıcı bakiyesine ihtiyaç duyulmadan büyük hacimli tasfiyeler gerçekleştirilebilir.
 - Sıfır Zarar Koruması: İşlem öncesi simülasyon ve sözleşme içi kontroller sayesinde kâr getirmeyecek hiçbir işlem ağda onaylanmaz ve zarar oluşmaz.
-- Geniş Çoklu Varlık Uyumluluğu (11 Ana Aave Rezervi):
-  - Hem Borç Hem Teminat Olarak Desteklenen Varlıklar: Native USDC, Bridged USDC.e, USDT, DAI, WETH, WBTC, wstETH, weETH, ARB, LINK, AAVE
-- Hızlı Veri İletişimi: Multicall3 altyapısı sayesinde minimum gecikme ve düşük ağ masrafı ile çalışır.
-- Yüksek Güvenlik Standardı: Token transferlerinde ve harcama izinlerinde OpenZeppelin SafeERC20 standartları uygulanır.
+- Geniş Çoklu Varlık Uyumluluğu (14 Ana Aave Rezervi):
+  - Hem Borç Hem Teminat Olarak Desteklenen Varlıklar: Native USDC, Bridged USDC.e, USDT, DAI, WETH, WBTC, wstETH, weETH, rETH, ARB, LINK, AAVE, FRAX, LUSD
+- Görsel İzleme ve Kontrol: Web arayüzü üzerinden sistemin çalışmasını, son 7 günlük tasfiye analizini ve risk altındaki cüzdanları canlı izleme.
+- Hızlı Veri İletişimi ve Doğrudan Sequencer Yayını: Multicall3 altyapısı, önbellekli Nonce/Gas yönetimi, paralel simülasyon ve doğrudan Arbitrum Resmi Sequencer yayını sayesinde minimum gecikme ile çalışır.
 
 ## Proje Mimarisi
 
-- bot/: Blokzinciri dinleyen, kullanıcıları takip eden, analiz yapan ve sözleşmeyi tetikleyen TypeScript tabanlı izleme katmanı.
+- baslat-panel.bat: Yerel yönetim panelini (`http://127.0.0.1:3000`) arka planda tek tıkla başlatan betik.
+- bot/: Blokzinciri dinleyen, kullanıcıları takip eden, analiz yapan, web panelini sunan ve sözleşmeyi tetikleyen TypeScript tabanlı katman.
   - bot/src/index.ts: Ana radar döngüleri, kullanıcı takibi, fiyat hesaplamaları ve işlem simülasyonu.
+  - bot/src/dashboard.ts: Web takip paneli için yerel veri sunucusu ve API servisi.
+  - bot/src/dashboard.html: Tarayıcı üzerinden çalışan canlı izleme ve kontrol arayüzü.
   - bot/data/monitored_users.json: Takip edilen aktif borçlu adreslerinin kalıcı kayıt dosyası.
 - contracts/: Arbitrum ağı üzerinde çalışan Foundry ve Solidity tabanlı akıllı sözleşme katmanı.
   - contracts/src/LiquidationBot.sol: Flaş kredi, tasfiye, Uniswap takası ve kâr aktarımını gerçekleştiren ana sözleşme.
