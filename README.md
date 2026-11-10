@@ -16,7 +16,8 @@ Sistem üç ana bileşenin uyum içinde çalışmasıyla işler:
 
 Blokzincir üzerindeki verileri sürekli takip eden ve tetikleme kararını veren gözlemci motorudur:
 
-- Kalıcı Borçlu Radarı: Sistem daha önce borç almış kullanıcıları yerel veri tabanında saklar. Ayrıca ağdaki yeni borçlanma işlemlerini canlı olarak dinleyerek listeye otomatik olarak ekler.
+- Kalıcı Borçlu Radarı (`onBehalfOf` Takibi): Sistem daha önce borç almış kullanıcıları yerel veri tabanında saklar. Ağdaki yeni borçlanma işlemlerinde aracı kontratlar yerine borcun gerçek sahibi olan `onBehalfOf` adresini dinleyerek kaldıraçlı pozisyonları da otomatik olarak listeye ekler.
+- Dinamik Rezerv ve Bonus Keşfi (`getAllReservesTokens`): Aave V3 Arbitrum üzerindeki tüm aktif rezerv varlıklarını, ondalık basamaklarını ve varlığa özel gerçek tasfiye bonus oranlarını protokol veri sağlayıcısından dinamik olarak çeker.
 - Üç Kademeli Keskin Nişancı Taraması:
   - Ultra-Kritik Radar: Sağlık Faktörü 1.045 seviyesinin altına inmiş (tasfiyeye çok yakın) kullanıcılar çoklu RPC havuzu üzerinden her 250 milisaniyede bir (Arbitrum blok hızında) kontrol edilir.
   - Kritik Radar: Sağlık Faktörü 1.045 ile 1.12 arasında olan riskli kullanıcılar her 2.5 saniyede bir kontrol edilir.

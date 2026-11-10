@@ -331,7 +331,7 @@ async function refreshKnownPricesAndMeta(extraAddresses: `0x${string}`[] = []) {
           symbol,
           decimals,
           priceUSD: 0,
-          isSupportedByBot: false
+          isSupportedByBot: true
         });
       }
     }
@@ -692,8 +692,9 @@ async function fetchRecentBorrowEvents(lookbackBlocks = 15000n) {
 
     for (const lg of logs) {
       if (lg.args?.reserve) extraTokens.push(getAddress(lg.args.reserve));
-      if (lg.args?.user && isAddress(lg.args.user)) {
-        const u = getAddress(lg.args.user);
+      const borrower = lg.args?.onBehalfOf || lg.args?.user;
+      if (borrower && isAddress(borrower)) {
+        const u = getAddress(borrower);
         borrowerAddrs.add(u);
         if (!monitoredUsersSet.has(u)) {
           monitoredUsersSet.add(u);
@@ -706,8 +707,9 @@ async function fetchRecentBorrowEvents(lookbackBlocks = 15000n) {
     await scanBorrowersMulticall(Array.from(borrowerAddrs));
 
     for (const lg of logs) {
-      if (!lg.args?.user || !lg.args?.reserve) continue;
-      const user = getAddress(lg.args.user);
+      const borrower = lg.args?.onBehalfOf || lg.args?.user;
+      if (!borrower || !lg.args?.reserve) continue;
+      const user = getAddress(borrower);
       const reserve = getAddress(lg.args.reserve);
       const amountRaw = BigInt(lg.args.amount || 0n);
       const rateMode = Number(lg.args.interestRateMode || 2);
