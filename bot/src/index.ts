@@ -359,15 +359,27 @@ async function getLiquidationCandidates(
       }
     ];
 
-    const client = getNextReadClient();
-    const results = await client.multicall({ contracts, allowFailure: true });
+    let pricesRaw: bigint[] | null = null;
+    let results: any[] = [];
 
-    const priceResult = results[results.length - 1];
-    const pricesRaw = (priceResult.status === 'success' ? priceResult.result : null) as
-      | bigint[]
-      | null;
+    for (let attempt = 0; attempt < readClients.length; attempt++) {
+      const client = getNextReadClient();
+      try {
+        results = await client.multicall({ contracts, allowFailure: true });
+        const priceResult = results[results.length - 1];
+        const candidatePrices = (priceResult?.status === 'success' ? priceResult.result : null) as
+          | bigint[]
+          | null;
+        if (candidatePrices && candidatePrices.length === reservesSnapshot.length) {
+          pricesRaw = candidatePrices;
+          break;
+        }
+      } catch {
+        // Sıradaki RPC ile tekrar dene
+      }
+    }
 
-    // ORACLE KORUMASI: Fiyat verisi alınamadıysa yanlış varsayılan (1.0$) kullanmak yerine değerlendirmeyi durdur.
+    // ORACLE KORUMASI: Tüm RPC'lerde fiyat verisi alınamadıysa yanlış varsayılan (1.0$) kullanmak yerine değerlendirmeyi durdur.
     if (!pricesRaw || pricesRaw.length !== reservesSnapshot.length) {
       logThrottledWarn('oracle_null', `Oracle price array incomplete for ${userAddress}; skipping evaluation.`);
       return [];
@@ -880,59 +892,72 @@ async function main() {
   // Arka planda geçmiş bloklardaki borçluları (onBehalfOf) senkronize et
   syncRecentBorrowers(currentBlock);
 
-  // Canlı ağda gerçekleşen yeni borçlanma olaylarını dinle (onBehalfOf öncelikli)
-  publicClient.watchEvent({
-    address: AAVE_POOL_ADDRESS,
-    event: borrowEventAbi,
-    onLogs: logs => {
-      let newUsersAdded = 0;
-      logs.forEach(log => {
-        const borrower = log.args?.onBehalfOf || log.args?.user;
-        if (borrower && isAddress(borrower)) {
-          const checksummed = getAddress(borrower);
-          if (!activeUsers.has(checksummed)) {
-            activeUsers.add(checksummed);
-            newUsersAdded++;
-            logInfo(`New borrower detected on-chain (onBehalfOf): ${checksummed}`);
+  // Canlı ağda gerçekleşen yeni Borrow ve LiquidationCall olaylarını eth_getFilterChanges kullanmadan (stateless getLogs ile) izle
+  let lastEventBlock = currentBlock;
+  setInterval(async () => {
+    for (const client of readClients) {
+      try {
+        const latestBlock = await client.getBlockNumber();
+        if (latestBlock <= lastEventBlock) return;
+
+        const fromBlock = lastEventBlock + 1n > latestBlock - 2000n ? lastEventBlock + 1n : latestBlock - 2000n;
+
+        const [borrowLogs, liqLogs] = await Promise.all([
+          client.getLogs({
+            address: AAVE_POOL_ADDRESS,
+            event: borrowEventAbi,
+            fromBlock,
+            toBlock: latestBlock
+          }),
+          client.getLogs({
+            address: AAVE_POOL_ADDRESS,
+            event: liquidationCallEventAbi,
+            fromBlock,
+            toBlock: latestBlock
+          })
+        ]);
+
+        lastEventBlock = latestBlock;
+
+        let newUsersAdded = 0;
+        for (const log of borrowLogs) {
+          const borrower = log.args?.onBehalfOf || log.args?.user;
+          if (borrower && isAddress(borrower)) {
+            const checksummed = getAddress(borrower);
+            if (!activeUsers.has(checksummed)) {
+              activeUsers.add(checksummed);
+              newUsersAdded++;
+              logInfo(`New borrower detected on-chain (onBehalfOf): ${checksummed}`);
+              checkUsersBatch([checksummed], true);
+            }
+          }
+        }
+        if (newUsersAdded > 0) {
+          scheduleSaveUsers();
+        }
+
+        for (const log of liqLogs) {
+          const user = log.args?.user;
+          const liquidator = log.args?.liquidator;
+          if (user && isAddress(user)) {
+            const checksummed = getAddress(user);
+            const inRadar = activeUsers.has(checksummed);
+            logAlert(
+              `ON-CHAIN LIQUIDATION OBSERVED | User: ${checksummed} | In Our Radar: ${inRadar ? 'YES' : 'NO'} | Liquidator: ${liquidator}`
+            );
+            if (!inRadar) {
+              activeUsers.add(checksummed);
+              scheduleSaveUsers();
+            }
             checkUsersBatch([checksummed], true);
           }
         }
-      });
-      if (newUsersAdded > 0) {
-        scheduleSaveUsers();
+        break;
+      } catch (err: any) {
+        // Sıradaki RPC'ye geç, tümü başarısız olursa 60sn'de bir uyar
       }
-    },
-    onError: err => {
-      logThrottledWarn('watch_borrow', `Borrow event watcher warning: ${err.message}`);
     }
-  });
-
-  // Ağdaki gerçek tasfiye olaylarını (LiquidationCall) izle
-  publicClient.watchEvent({
-    address: AAVE_POOL_ADDRESS,
-    event: liquidationCallEventAbi,
-    onLogs: logs => {
-      logs.forEach(log => {
-        const user = log.args?.user;
-        const liquidator = log.args?.liquidator;
-        if (user && isAddress(user)) {
-          const checksummed = getAddress(user);
-          const inRadar = activeUsers.has(checksummed);
-          logAlert(
-            `ON-CHAIN LIQUIDATION OBSERVED | User: ${checksummed} | In Our Radar: ${inRadar ? 'YES' : 'NO'} | Liquidator: ${liquidator}`
-          );
-          if (!inRadar) {
-            activeUsers.add(checksummed);
-            scheduleSaveUsers();
-          }
-          checkUsersBatch([checksummed], true);
-        }
-      });
-    },
-    onError: err => {
-      logThrottledWarn('watch_liq', `LiquidationCall event watcher warning: ${err.message}`);
-    }
-  });
+  }, 10000);
 
   logInfo(
     `Starting 3-tier Multi-RPC radar loops (250ms / 2.5s / 15s). Monitoring ${activeUsers.size} addresses across ${AAVE_RESERVE_ASSETS.length} reserves.`
