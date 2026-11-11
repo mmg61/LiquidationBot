@@ -7,7 +7,7 @@ import {IPoolAddressesProvider} from "@aave/core-v3/contracts/interfaces/IPoolAd
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// Uniswap V3 Router Arayüzü (Teminatı satıp borcu kapatmak için)
+// Uniswap V3 Router Arayüzü (Hem Tekil Havuz hem Çok Adımlı Rota Desteği)
 interface ISwapRouter {
     struct ExactInputSingleParams {
         address tokenIn;
@@ -20,11 +20,25 @@ interface ISwapRouter {
         uint160 sqrtPriceLimitX96;
     }
 
+    struct ExactInputParams {
+        bytes path;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+    }
+
     function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
+
+    function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
 }
 
 contract LiquidationBot is IFlashLoanSimpleReceiver {
     using SafeERC20 for IERC20;
+
+    // Arbitrum One Ana Köprü Varlıkları (Çok adımlı takas rotaları için)
+    address public constant WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
+    address public constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
 
     IPoolAddressesProvider public immutable addressProvider;
     IPool public immutable pool;
@@ -54,13 +68,13 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         profitRecipient = msg.sender;
     }
 
-    // Kârın aktarılacağı soğuk cüzdan adresini güncelleme (İsteğe bağlı güvenlik ayrımı)
+    // Kârın aktarılacağı cüzdan adresini güncelleme (Sıcak/soğuk cüzdan ayrımı için)
     function setProfitRecipient(address _newRecipient) external onlyOwner {
         require(_newRecipient != address(0), "Invalid recipient");
         profitRecipient = _newRecipient;
     }
 
-    // 1A. Geriye dönük uyumluluk: Varsayılan 500 (%0.05 Arbitrum ana havuzu) ile tasfiye tetikleme
+    // 1A. Geriye dönük uyumluluk: 4 parametreli çağrı
     function triggerLiquidation(
         address debtAsset,
         address collateralAsset,
@@ -70,7 +84,7 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         _executeLiquidation(debtAsset, collateralAsset, userToLiquidate, debtToCover, 500, 0);
     }
 
-    // 1B. Dinamik havuz komisyonu (Örn: 500, 3000) belirterek tasfiye tetikleme
+    // 1B. 5 parametreli çağrı (Havuz ücreti belirtmeli)
     function triggerLiquidation(
         address debtAsset,
         address collateralAsset,
@@ -81,7 +95,7 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
         _executeLiquidation(debtAsset, collateralAsset, userToLiquidate, debtToCover, poolFee == 0 ? 500 : poolFee, 0);
     }
 
-    // 1C. Dinamik havuz komisyonu ve minimum net kâr (minProfit) garantisi ile tasfiye tetikleme
+    // 1C. 6 parametreli tam korumalı çağrı (Havuz ücreti + Minimum Net Kâr garantisi)
     function triggerLiquidation(
         address debtAsset,
         address collateralAsset,
@@ -112,7 +126,6 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
             })
         );
 
-        // Aave'den Flaş Kredi (Flash Loan) İsteği
         pool.flashLoanSimple(
             address(this),
             debtAsset,
@@ -121,12 +134,99 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
             0
         );
 
-        // --- KÂRI ANINDA CÜZDANA AKTARMA ---
-        // Flaş kredi geri ödendikten sonra sözleşmede kalan debtAsset net kârımızdır.
+        // Flaş kredi geri ödendikten sonra sözleşmede kalan tüm debtAsset net kârımızdır
         uint256 profit = IERC20(debtAsset).balanceOf(address(this));
         if (profit > 0) {
             IERC20(debtAsset).safeTransfer(profitRecipient, profit);
         }
+    }
+
+    // Tekil havuz denemesi (Başarısız olursa veya minimum çıktıyı karşılamazsa false döner)
+    function _trySingleSwap(
+        address tokenIn,
+        address tokenOut,
+        uint24 fee,
+        uint256 amountIn,
+        uint256 amountOutMinimum
+    ) internal returns (bool) {
+        try
+            swapRouter.exactInputSingle(
+                ISwapRouter.ExactInputSingleParams({
+                    tokenIn: tokenIn,
+                    tokenOut: tokenOut,
+                    fee: fee,
+                    recipient: address(this),
+                    deadline: block.timestamp,
+                    amountIn: amountIn,
+                    amountOutMinimum: amountOutMinimum,
+                    sqrtPriceLimitX96: 0
+                })
+            )
+        returns (uint256) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    // Çok adımlı (2-Hop) takas denemesi: tokenIn -> midToken -> tokenOut
+    function _tryMultiHopSwap(
+        address tokenIn,
+        uint24 fee1,
+        address midToken,
+        uint24 fee2,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOutMinimum
+    ) internal returns (bool) {
+        if (tokenIn == midToken || tokenOut == midToken) return false;
+        try
+            swapRouter.exactInput(
+                ISwapRouter.ExactInputParams({
+                    path: abi.encodePacked(tokenIn, fee1, midToken, fee2, tokenOut),
+                    recipient: address(this),
+                    deadline: block.timestamp,
+                    amountIn: amountIn,
+                    amountOutMinimum: amountOutMinimum
+                })
+            )
+        returns (uint256) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    // Otomatik Çoklu Havuz ve Çok Adımlı (WETH / USDC Köprülü) Takas Motoru
+    function _swapCollateralForDebt(
+        address collateralAsset,
+        address debtAsset,
+        uint24 preferredFee,
+        uint256 collateralAmount,
+        uint256 requiredAmountOut
+    ) internal {
+        // 1. Öncelikli tekil havuz (Örn: 500)
+        if (_trySingleSwap(collateralAsset, debtAsset, preferredFee, collateralAmount, requiredAmountOut)) return;
+
+        // 2. Alternatif tekil havuzlar (3000 = %0.30, 100 = %0.01, 500 = %0.05, 10000 = %1.00)
+        if (preferredFee != 3000 && _trySingleSwap(collateralAsset, debtAsset, 3000, collateralAmount, requiredAmountOut)) return;
+        if (preferredFee != 100 && _trySingleSwap(collateralAsset, debtAsset, 100, collateralAmount, requiredAmountOut)) return;
+        if (preferredFee != 500 && _trySingleSwap(collateralAsset, debtAsset, 500, collateralAmount, requiredAmountOut)) return;
+        if (preferredFee != 10000 && _trySingleSwap(collateralAsset, debtAsset, 10000, collateralAmount, requiredAmountOut)) return;
+
+        // 3. WETH üzerinden 2 adımlı (Multi-Hop) rotalar (Örn: ARB/LINK/wstETH/weETH -> WETH -> USDC/USDT/DAI/GHO)
+        if (_tryMultiHopSwap(collateralAsset, 500, WETH, 500, debtAsset, collateralAmount, requiredAmountOut)) return;
+        if (_tryMultiHopSwap(collateralAsset, 3000, WETH, 500, debtAsset, collateralAmount, requiredAmountOut)) return;
+        if (_tryMultiHopSwap(collateralAsset, 100, WETH, 500, debtAsset, collateralAmount, requiredAmountOut)) return;
+        if (_tryMultiHopSwap(collateralAsset, 500, WETH, 3000, debtAsset, collateralAmount, requiredAmountOut)) return;
+        if (_tryMultiHopSwap(collateralAsset, 3000, WETH, 3000, debtAsset, collateralAmount, requiredAmountOut)) return;
+
+        // 4. Native USDC üzerinden 2 adımlı (Multi-Hop) rotalar
+        if (_tryMultiHopSwap(collateralAsset, 500, USDC, 100, debtAsset, collateralAmount, requiredAmountOut)) return;
+        if (_tryMultiHopSwap(collateralAsset, 500, USDC, 500, debtAsset, collateralAmount, requiredAmountOut)) return;
+        if (_tryMultiHopSwap(collateralAsset, 100, USDC, 500, debtAsset, collateralAmount, requiredAmountOut)) return;
+
+        revert("All swap routes failed or insufficient output");
     }
 
     // 2. Flaş kredi geldiğinde Aave otomatik olarak bu fonksiyonu tetikler
@@ -152,30 +252,29 @@ contract LiquidationBot is IFlashLoanSimpleReceiver {
             false
         );
 
-        // b) Elde edilen teminatı borsada sat (Uniswap V3)
-        uint256 collateralReceived = IERC20(data.collateralAsset).balanceOf(address(this));
-        require(collateralReceived > 0, "No collateral received");
-
-        IERC20(data.collateralAsset).forceApprove(address(swapRouter), collateralReceived);
-
-        ISwapRouter.ExactInputSingleParams memory swapParams = ISwapRouter.ExactInputSingleParams({
-            tokenIn: data.collateralAsset,
-            tokenOut: asset,
-            fee: data.poolFee,
-            recipient: address(this),
-            deadline: block.timestamp + 100,
-            amountIn: collateralReceived,
-            amountOutMinimum: 0,
-            sqrtPriceLimitX96: 0
-        });
-
-        swapRouter.exactInputSingle(swapParams);
-
-        // c) Borcu geri öde (Miktar + Flaş Kredi Faizi + Minimum Kâr)
-        // Aave borcun tamamını kullanmadıysa sözleşmede kalan artan bakiye + takastan gelen toplam bakiye kontrol edilir.
+        // c) Geri ödenecek toplam borç + minimum kâr hedefini hesapla ve takas et
         uint256 totalDebt = amount + premium;
-        uint256 finalBalance = IERC20(asset).balanceOf(address(this));
-        require(finalBalance >= totalDebt + data.minProfit, "Not profitable! Reverting...");
+        uint256 targetBalance = totalDebt + data.minProfit;
+        {
+            uint256 collateralReceived = IERC20(data.collateralAsset).balanceOf(address(this));
+            require(collateralReceived > 0, "No collateral received");
+
+            uint256 unspentAsset = IERC20(asset).balanceOf(address(this));
+            uint256 requiredAmountOut = targetBalance > unspentAsset ? (targetBalance - unspentAsset) : 0;
+
+            IERC20(data.collateralAsset).forceApprove(address(swapRouter), collateralReceived);
+
+            _swapCollateralForDebt(
+                data.collateralAsset,
+                asset,
+                data.poolFee,
+                collateralReceived,
+                requiredAmountOut
+            );
+        }
+
+        // d) Nihai bakiye kontrolü (Anapara + Faiz + Minimum Kâr garantisi)
+        require(IERC20(asset).balanceOf(address(this)) >= targetBalance, "Not profitable! Reverting...");
 
         IERC20(asset).forceApprove(address(pool), totalDebt);
 

@@ -1243,6 +1243,17 @@
       if (e.key === 'Escape') closeUserModal();
     });
 
+    // Sekme açık kaldığı sürece arka plan sunucusuyla canlı bağlantı tutar; sekme kapatıldığında arka plan otomatik kapanır
+    const liveStream = new EventSource('/api/live-connection');
+    window.addEventListener('pagehide', () => {
+      try {
+        liveStream.close();
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon('/api/tab-closed');
+        }
+      } catch {}
+    });
+
     fetchState();
     setInterval(fetchState, 3000);
   </script>

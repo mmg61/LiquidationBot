@@ -28,7 +28,7 @@ const AAVE_DATA_PROVIDER_ADDRESS = '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654' 
 const AAVE_ORACLE_ADDRESS = '0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7' as const;
 
 const OUR_BOT_CONTRACT_ADDRESS = (
-  process.env.BOT_CONTRACT_ADDRESS || '0x086c52f53962B8F57d8b6d29FaB9CF0FB37ac893'
+  process.env.BOT_CONTRACT_ADDRESS || '0x1cA5f9cAcbEe5533E03fd643E2d4BC89aF667c6c'
 ) as `0x${string}`;
 
 let walletAddress = 'Tanımsız';
@@ -871,13 +871,34 @@ async function getUserPositionDetails(userAddress: `0x${string}`) {
 }
 
 // ============================================================================
-// 10. HTTP SUNUCUSU (SADECE 127.0.0.1 YEREL ERISIM)
+// 10. SEKME KAPANMA ALGILAYICISI VE HTTP SUNUCUSU (SADECE 127.0.0.1)
 // ============================================================================
+let activeTabStreams = 0;
+let autoShutdownTimer: NodeJS.Timeout | null = null;
+
+function cancelAutoShutdown() {
+  if (autoShutdownTimer) {
+    clearTimeout(autoShutdownTimer);
+    autoShutdownTimer = null;
+  }
+}
+
+function scheduleAutoShutdown(delayMs = 2500) {
+  cancelAutoShutdown();
+  autoShutdownTimer = setTimeout(() => {
+    if (activeTabStreams === 0) {
+      console.log('[SYSTEM] Browser tab closed. Shutting down local dashboard process.');
+      process.exit(0);
+    }
+  }, delayMs);
+}
+
 const server = http.createServer(async (req, res) => {
   const parsedUrl = url.parse(req.url || '/', true);
   const pathname = parsedUrl.pathname || '/';
 
   if (pathname === '/' || pathname === '/index.html') {
+    cancelAutoShutdown();
     try {
       const html = fs.readFileSync(HTML_FILE, 'utf-8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -885,6 +906,45 @@ const server = http.createServer(async (req, res) => {
     } catch (err: any) {
       res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end(`HTML okuma hatasi: ${err.message}`);
+    }
+    return;
+  }
+
+  // Tarayici sekmesi acik oldugu surece canli kalan TCP akisi; sekme kapandigi milisaniye req.on('close') tetiklenir
+  if (pathname === '/api/live-connection') {
+    cancelAutoShutdown();
+    activeTabStreams++;
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
+    });
+    res.write('data: connected\n\n');
+
+    const keepAlive = setInterval(() => {
+      try {
+        res.write('data: ping\n\n');
+      } catch {
+        clearInterval(keepAlive);
+      }
+    }, 15000);
+
+    req.on('close', () => {
+      clearInterval(keepAlive);
+      activeTabStreams = Math.max(0, activeTabStreams - 1);
+      if (activeTabStreams === 0) {
+        // F5 (sayfa yenileme) durumuna izin vermek icin 2.5 saniye bekle; yeni sekme baglanmazsa sureci tamamen kapat
+        scheduleAutoShutdown(2500);
+      }
+    });
+    return;
+  }
+
+  if (pathname === '/api/tab-closed') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    if (activeTabStreams === 0) {
+      scheduleAutoShutdown(2000);
     }
     return;
   }

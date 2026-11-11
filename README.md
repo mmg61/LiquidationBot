@@ -33,9 +33,9 @@ Tasfiye adımını blokzincir üzerinde tek bir işlem içinde (atomik olarak) t
 
 - Flaş Kredi (Flash Loan): İşlem için cüzdanda ön sermaye bulunması gerekmez. Sözleşme, Aave havuzundan gereken tutarda borcu sıfır teminatla anlık olarak ödünç alır.
 - Tasfiye Çağrısı: Alınan bu borçla riskli kullanıcının borcu kapatılır ve kullanıcının indirimli teminatı sözleşmeye aktarılır.
-- Otomatik Satış (Uniswap V3): Elde edilen teminat, Uniswap V3 borsası üzerinden hemen borç varlığına dönüştürülür.
-- Kredi İadesi ve Güvenlik Kontrolü: Flaş kredinin anapara ve faiz tutarı Aave protokolüne geri ödenir. Eğer yapılan satış borcu ve masrafları karşılamaya yetmiyorsa işlem baştan iptal edilir.
-- Anında Kâr Aktarımı: Masraflar ödendikten sonra kalan net kâr sözleşmede bekletilmez; doğrudan sözleşme sahibinin cüzdanına gönderilir.
+- Otomatik Satış (Çoklu Havuz ve Çoklu Adım Uniswap V3): Elde edilen teminat, Uniswap V3 üzerinde önce tek adımlı (`0.05%`, `0.3%`, `0.01%`, `1%`) havuzlarda, doğrudan likidite yoksa `WETH` ve `USDC` köprüleri üzerinden iki adımlı (`exactInput`) rotalarda en az `requiredAmountOut` (`amountOutMinimum`) garantisiyle borç varlığına dönüştürülür.
+- Kredi İadesi, Artan Flaş Kredi (`unspentAsset`) ve `minProfit` Kontrolü: Flaş kredinin anapara ve faiz tutarı Aave protokolüne geri ödenir. Satış sonrası toplam bakiye (`finalBalance`) anapara + faiz + `minProfit` tutarını karşılamıyorsa işlem atomik olarak iptal edilir.
+- Anında Kâr Aktarımı (`profitRecipient`): Masraflar ödendikten sonra kalan net kâr sözleşmede bekletilmez; doğrudan `profitRecipient` cüzdanına gönderilir.
 
 ### 3. Web Tabanlı İzleme ve Yönetim Paneli
 

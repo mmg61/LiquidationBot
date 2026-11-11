@@ -178,7 +178,8 @@ const liquidationCallEventAbi = parseAbiItem(
 );
 const botContractAbi = parseAbi([
   'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover) external',
-  'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover, uint24 poolFee) external'
+  'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover, uint24 poolFee) external',
+  'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover, uint24 poolFee, uint256 minProfit) external'
 ]);
 
 // Aave ProtocolDataProvider üzerinden tüm aktif rezervleri, ondalık basamaklarını ve gerçek tasfiye bonuslarını dinamik çeker.
@@ -264,6 +265,7 @@ interface LiquidationCandidate {
   debtName: string;
   debtAmount: bigint;
   debtDecimals: number;
+  debtPriceUSD: number;
   debtUSD: number;
   collateralAsset: `0x${string}`;
   collateralName: string;
@@ -371,7 +373,7 @@ async function getLiquidationCandidates(
       return [];
     }
 
-    const userDebts: { asset: ReserveAsset; amount: bigint; usd: number }[] = [];
+    const userDebts: { asset: ReserveAsset; amount: bigint; priceUSD: number; usd: number }[] = [];
     const userCollaterals: { asset: ReserveAsset; usd: number }[] = [];
 
     for (let i = 0; i < reservesSnapshot.length; i++) {
@@ -408,7 +410,7 @@ async function getLiquidationCandidates(
           const debtTokenAmount = Number(formatUnits(totalAssetDebt, asset.decimals));
           const debtValueUSD = debtTokenAmount * priceUSD;
           if (debtValueUSD >= MIN_STRIKE_DEBT_USD) {
-            userDebts.push({ asset, amount: totalAssetDebt, usd: debtValueUSD });
+            userDebts.push({ asset, amount: totalAssetDebt, priceUSD, usd: debtValueUSD });
           }
         }
 
@@ -438,6 +440,7 @@ async function getLiquidationCandidates(
             debtName: d.asset.name,
             debtAmount: d.amount,
             debtDecimals: d.asset.decimals,
+            debtPriceUSD: d.priceUSD,
             debtUSD: d.usd,
             collateralAsset: c.asset.address,
             collateralName: c.asset.name,
@@ -505,6 +508,7 @@ async function executeLiquidationStrike(
   interface StrikePlan {
     target: LiquidationCandidate;
     amount: bigint;
+    minProfitRaw: bigint;
     usd: number;
     expectedNetBonusUSD: number;
     label: string;
@@ -518,9 +522,9 @@ async function executeLiquidationStrike(
     let fullDebtToCover = healthFactor <= 0.95 ? target.debtAmount : target.debtAmount / 2n;
     let fullCoverUSD = healthFactor <= 0.95 ? target.debtUSD : target.debtUSD / 2;
 
-    // Varlığın kendi gerçek tasfiye bonus oranına göre teminat tavanı kontrolü (+%0.5 güvenlik payı)
-    const bonusDivisor = target.liquidationBonusRatio + 0.005;
-    const maxCoverableByCollateralUSD = target.collateralUSD / bonusDivisor;
+    // Aave v3.3 MustNotLeaveDust kuralına takılmamak için +%0.5 kırpma yapmadan doğrudan gerçek bonus oranıyla sınırla
+    // (Sözleşmedeki unspentAsset + finalBalance kontrolü Aave'nin kullanmadığı flaş krediyi otomatik dengeler)
+    const maxCoverableByCollateralUSD = target.collateralUSD / target.liquidationBonusRatio;
 
     if (fullCoverUSD > maxCoverableByCollateralUSD) {
       const scaleRatio = BigInt(Math.floor((maxCoverableByCollateralUSD / fullCoverUSD) * 10000));
@@ -541,9 +545,18 @@ async function executeLiquidationStrike(
       continue;
     }
 
+    // Sözleşme içi minProfit garantisi: En az gas maliyetini karşılayacak borç tokenı miktarı
+    const minProfitUSD = Math.max(0.05, estimatedGasCostUSD);
+    const minProfitTokens =
+      target.debtPriceUSD > 0 ? minProfitUSD / target.debtPriceUSD : 0;
+    const minProfitRaw = BigInt(
+      Math.max(1, Math.floor(minProfitTokens * Math.pow(10, Math.min(target.debtDecimals, 8))))
+    ) * (target.debtDecimals > 8 ? 10n ** BigInt(target.debtDecimals - 8) : 1n);
+
     plans.push({
       target,
       amount: fullDebtToCover,
+      minProfitRaw,
       usd: fullCoverUSD,
       expectedNetBonusUSD,
       label: 'FULL'
@@ -554,6 +567,7 @@ async function executeLiquidationStrike(
       plans.push({
         target,
         amount: fullDebtToCover / 2n,
+        minProfitRaw,
         usd: fullCoverUSD / 2,
         expectedNetBonusUSD: expectedNetBonusUSD / 2,
         label: 'PARTIAL-50%'
@@ -563,14 +577,21 @@ async function executeLiquidationStrike(
 
   if (plans.length === 0) return;
 
-  // PARALEL ÖN SİMÜLASYON
+  // PARALEL ÖN SİMÜLASYON (6 parametreli: debtAsset, collateralAsset, user, amount, poolFee=500, minProfit)
   const simResults = await Promise.allSettled(
     plans.map(plan =>
       publicClient.simulateContract({
         address: OUR_BOT_CONTRACT_ADDRESS,
         abi: botContractAbi,
         functionName: 'triggerLiquidation',
-        args: [plan.target.debtAsset, plan.target.collateralAsset, userAddress, plan.amount],
+        args: [
+          plan.target.debtAsset,
+          plan.target.collateralAsset,
+          userAddress,
+          plan.amount,
+          500,
+          plan.minProfitRaw
+        ],
         account
       })
     )
@@ -595,18 +616,16 @@ async function executeLiquidationStrike(
           maxFeePerGas: cachedGasPriceWei * 2n + 10000000n,
           maxPriorityFeePerGas: 0n
         };
+
+        // NONCE ÇAKIŞMA KORUMASI: Gönderim öncesinde senkron olarak nonce ayır; hata olursa catch bloğunda ağdan geri senkronize edilir
         if (cachedNonce !== undefined) {
           txOptions.nonce = cachedNonce;
+          cachedNonce++;
         }
 
         const txHash = await Promise.any(
           broadcastWalletClients.map(wc => wc.writeContract(txOptions))
         );
-
-        // Gönderim başarılı olduğu anda yerel nonce değerini ilerlet
-        if (cachedNonce !== undefined) {
-          cachedNonce++;
-        }
 
         logAlert(`TRANSACTION BROADCASTED | Waiting for on-chain receipt | TxHash: ${txHash}`);
 
