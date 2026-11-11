@@ -119,7 +119,13 @@ setInterval(refreshExecutionParams, 8000);
 const AAVE_POOL_ADDRESS = '0x794a61358D6845594F94dc1DB02A252b5b4814aD' as const;
 const AAVE_DATA_PROVIDER_ADDRESS = '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654' as const;
 const AAVE_ORACLE_ADDRESS = '0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7' as const;
-const OUR_BOT_CONTRACT_ADDRESS = process.env.BOT_CONTRACT_ADDRESS as `0x${string}`;
+
+const rawBotContractAddr = (process.env.BOT_CONTRACT_ADDRESS || '').trim().toLowerCase();
+if (!rawBotContractAddr || !isAddress(rawBotContractAddr)) {
+  throw new Error('FATAL: Valid BOT_CONTRACT_ADDRESS is required in .env');
+}
+const OUR_BOT_CONTRACT_ADDRESS = getAddress(rawBotContractAddr);
+let cachedEthPriceUSD = 2600;
 
 // MİKRO BORÇ VE SIFIR ZARAR FİLTRELERİ:
 const MIN_DEBT_USD = 50.0;
@@ -170,6 +176,7 @@ const getUserReserveDataAbi = parseAbiItem(
   'function getUserReserveData(address asset, address user) view returns (uint256 currentATokenBalance, uint256 currentStableDebt, uint256 currentVariableDebt, uint256 principalStableDebt, uint256 scaledVariableDebt, uint256 stableBorrowRate, uint256 liquidityRate, uint40 stableRateLastUpdated, bool usageAsCollateralEnabled)'
 );
 const getAssetsPricesAbi = parseAbiItem('function getAssetsPrices(address[] assets) view returns (uint256[])');
+const getUserEModeAbi = parseAbiItem('function getUserEMode(address user) view returns (uint256)');
 const borrowEventAbi = parseAbiItem(
   'event Borrow(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount, uint8 interestRateMode, uint256 borrowRate, uint16 indexed referralCode)'
 );
@@ -356,17 +363,28 @@ async function getLiquidationCandidates(
         abi: [getAssetsPricesAbi] as const,
         functionName: 'getAssetsPrices' as const,
         args: [allAssetAddresses] as const
+      },
+      {
+        address: AAVE_POOL_ADDRESS,
+        abi: [getUserEModeAbi] as const,
+        functionName: 'getUserEMode' as const,
+        args: [userAddress] as const
       }
     ];
 
     let pricesRaw: bigint[] | null = null;
+    let userEMode = 0n;
     let results: any[] = [];
 
     for (let attempt = 0; attempt < readClients.length; attempt++) {
       const client = getNextReadClient();
       try {
         results = await client.multicall({ contracts, allowFailure: true });
-        const priceResult = results[results.length - 1];
+        const priceResult = results[results.length - 2];
+        const eModeResult = results[results.length - 1];
+        if (eModeResult?.status === 'success' && typeof eModeResult.result === 'bigint') {
+          userEMode = eModeResult.result;
+        }
         const candidatePrices = (priceResult?.status === 'success' ? priceResult.result : null) as
           | bigint[]
           | null;
@@ -416,6 +434,9 @@ async function getLiquidationCandidates(
 
         const priceUSD = Number(pricesRaw[i]) / 1e8;
         if (priceUSD <= 0) continue;
+        if (asset.address.toLowerCase() === '0x82af49447d8a07e3bd95bd0d56f35241523fbab1') {
+          cachedEthPriceUSD = priceUSD;
+        }
 
         const totalAssetDebt = currentVariableDebt + currentStableDebt;
         if (totalAssetDebt > 0n) {
@@ -457,7 +478,8 @@ async function getLiquidationCandidates(
             collateralAsset: c.asset.address,
             collateralName: c.asset.name,
             collateralUSD: c.usd,
-            liquidationBonusRatio: c.asset.liquidationBonusRatio
+            // Kullanıcı eMode içindeyse (ör. ETH-Correlated / Stablecoin eMode) tasfiye bonusu ~%1 (1.01) olur
+            liquidationBonusRatio: userEMode > 0n ? 1.01 : c.asset.liquidationBonusRatio
           });
         }
       }
@@ -527,8 +549,8 @@ async function executeLiquidationStrike(
   }
 
   const plans: StrikePlan[] = [];
-  // Tahmini Arbitrum gas maliyeti (~900,000 gas * güncel gas fiyatı * ~$2600 ETH)
-  const estimatedGasCostUSD = Math.max(0.02, cachedGasPriceGwei * 0.0009 * 2600);
+  // Tahmini Arbitrum gas maliyeti (~900,000 gas * güncel gas fiyatı * canlı Oracle WETH fiyatı)
+  const estimatedGasCostUSD = Math.max(0.02, cachedGasPriceGwei * 0.0009 * cachedEthPriceUSD);
 
   for (const target of candidates) {
     let fullDebtToCover = healthFactor <= 0.95 ? target.debtAmount : target.debtAmount / 2n;
@@ -557,8 +579,8 @@ async function executeLiquidationStrike(
       continue;
     }
 
-    // Sözleşme içi minProfit garantisi: En az gas maliyetini karşılayacak borç tokenı miktarı
-    const minProfitUSD = Math.max(0.05, estimatedGasCostUSD);
+    // Sözleşme içi minProfit garantisi: En az tahmini gas maliyeti + minimum net kâr ($0.15) tutarını karşılayacak borç tokenı miktarı
+    const minProfitUSD = Math.max(0.05, estimatedGasCostUSD + MIN_EXPECTED_NET_PROFIT_USD);
     const minProfitTokens =
       target.debtPriceUSD > 0 ? minProfitUSD / target.debtPriceUSD : 0;
     const minProfitRaw = BigInt(
@@ -895,29 +917,32 @@ async function main() {
   // Canlı ağda gerçekleşen yeni Borrow ve LiquidationCall olaylarını eth_getFilterChanges kullanmadan (stateless getLogs ile) izle
   let lastEventBlock = currentBlock;
   setInterval(async () => {
+    let lastErr: any = null;
     for (const client of readClients) {
       try {
         const latestBlock = await client.getBlockNumber();
         if (latestBlock <= lastEventBlock) return;
 
-        const fromBlock = lastEventBlock + 1n > latestBlock - 2000n ? lastEventBlock + 1n : latestBlock - 2000n;
+        // Bağlantı kesintisinde hiçbir bloğu atlamamak için ileriye doğru en fazla 2000 blokluk dilimlerle ilerle
+        const fromBlock = lastEventBlock + 1n;
+        const toBlock = fromBlock + 2000n < latestBlock ? fromBlock + 2000n : latestBlock;
 
         const [borrowLogs, liqLogs] = await Promise.all([
           client.getLogs({
             address: AAVE_POOL_ADDRESS,
             event: borrowEventAbi,
             fromBlock,
-            toBlock: latestBlock
+            toBlock
           }),
           client.getLogs({
             address: AAVE_POOL_ADDRESS,
             event: liquidationCallEventAbi,
             fromBlock,
-            toBlock: latestBlock
+            toBlock
           })
         ]);
 
-        lastEventBlock = latestBlock;
+        lastEventBlock = toBlock;
 
         let newUsersAdded = 0;
         for (const log of borrowLogs) {
@@ -952,10 +977,17 @@ async function main() {
             checkUsersBatch([checksummed], true);
           }
         }
+        lastErr = null;
         break;
       } catch (err: any) {
-        // Sıradaki RPC'ye geç, tümü başarısız olursa 60sn'de bir uyar
+        lastErr = err;
       }
+    }
+    if (lastErr) {
+      logThrottledWarn(
+        'poll_events',
+        `Event polling failed across all RPCs: ${lastErr.shortMessage || lastErr.message}`
+      );
     }
   }, 10000);
 

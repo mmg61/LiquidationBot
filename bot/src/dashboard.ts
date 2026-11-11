@@ -27,9 +27,11 @@ const AAVE_POOL_ADDRESS = '0x794a61358D6845594F94dc1DB02A252b5b4814aD' as const;
 const AAVE_DATA_PROVIDER_ADDRESS = '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654' as const;
 const AAVE_ORACLE_ADDRESS = '0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7' as const;
 
-const OUR_BOT_CONTRACT_ADDRESS = (
-  process.env.BOT_CONTRACT_ADDRESS || '0x1cA5f9cAcbEe5533E03fd643E2d4BC89aF667c6c'
-) as `0x${string}`;
+const OUR_BOT_CONTRACT_ADDRESS = getAddress(
+  (process.env.BOT_CONTRACT_ADDRESS || '0x1CA5f9cACbee5533E03FD643E2d4BC89af667c6c')
+    .trim()
+    .toLowerCase()
+);
 
 let walletAddress = 'Tanımsız';
 if (process.env.PRIVATE_KEY) {

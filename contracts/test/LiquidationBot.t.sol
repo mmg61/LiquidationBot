@@ -111,15 +111,31 @@ contract MockSwapRouter {
 
     function exactInput(ISwapRouter.ExactInputParams calldata params) external payable returns (uint256) {
         require(simulatedAmountOut >= params.amountOutMinimum, "Too little received");
-        // Extract tokenIn (first 20 bytes) and tokenOut (last 20 bytes) from packed path
-        address tokenIn;
-        address tokenOut;
+        // Strictly validate 2-hop packed path: tokenIn (20B) + fee1 (3B) + bridge (20B) + fee2 (3B) + tokenOut (20B) = 66 bytes
         bytes memory path = params.path;
-        uint256 pathLen = path.length;
+        require(path.length == 66, "Invalid 2-hop path length");
+
+        address tokenIn;
+        uint24 fee1;
+        address bridge;
+        uint24 fee2;
+        address tokenOut;
         assembly {
             tokenIn := shr(96, mload(add(path, 32)))
-            tokenOut := shr(96, mload(add(add(path, 32), sub(pathLen, 20))))
+            fee1 := shr(232, mload(add(path, 52)))
+            bridge := shr(96, mload(add(path, 55)))
+            fee2 := shr(232, mload(add(path, 75)))
+            tokenOut := shr(96, mload(add(path, 78)))
         }
+
+        require(
+            bridge == 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1 ||
+            bridge == 0xaf88d065e77c8cC2239327C5EDb3A432268e5831,
+            "Invalid intermediate bridge token"
+        );
+        require(fee1 == 500 || fee1 == 3000, "Invalid fee1 tier");
+        require(fee2 == 500 || fee2 == 3000, "Invalid fee2 tier");
+
         MockERC20(tokenIn).transferFrom(msg.sender, address(this), params.amountIn);
         MockERC20(tokenOut).mint(params.recipient, simulatedAmountOut);
         return simulatedAmountOut;
