@@ -143,24 +143,34 @@ interface ReserveAsset {
   address: `0x${string}`;
   decimals: number;
   liquidationBonusRatio: number; // Örn: 1.05 (%5 bonus)
+  reserveId: number; // Aave V3.2/3.3 eMode collateralBitmap içindeki bit indeksi
 }
+
+interface EModeCategoryConfig {
+  id: number;
+  bonusRatio: number; // Örn: 1.01 (%1), 1.075 (%7.5), 1.10 (%10)
+  collateralBitmap: bigint;
+  label: string;
+}
+
+const eModeCategories = new Map<number, EModeCategoryConfig>();
 
 // Başlangıç yedek rezerv listesi; bot açılışta getAllReservesTokens() ile Aave'deki tüm aktif varlıkları dinamik olarak üzerine ekler.
 let AAVE_RESERVE_ASSETS: ReserveAsset[] = [
-  { name: 'USDC',   address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6,  liquidationBonusRatio: 1.045 },
-  { name: 'USDC.e', address: '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8', decimals: 6,  liquidationBonusRatio: 1.05 },
-  { name: 'USDT',   address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', decimals: 6,  liquidationBonusRatio: 1.05 },
-  { name: 'DAI',    address: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1', decimals: 18, liquidationBonusRatio: 1.05 },
-  { name: 'WETH',   address: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', decimals: 18, liquidationBonusRatio: 1.05 },
-  { name: 'WBTC',   address: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f', decimals: 8,  liquidationBonusRatio: 1.065 },
-  { name: 'wstETH', address: '0x5979D7b546E38E414F7E9822514be443A4800529', decimals: 18, liquidationBonusRatio: 1.07 },
-  { name: 'weETH',  address: '0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe', decimals: 18, liquidationBonusRatio: 1.075 },
-  { name: 'rETH',   address: '0xEC70Dcb4A1EFa46b8F2D97C310C9c4790ba5ffA8', decimals: 18, liquidationBonusRatio: 1.075 },
-  { name: 'ARB',    address: '0x912CE59144191C1204E64559FE8253a0e49E6548', decimals: 18, liquidationBonusRatio: 1.10 },
-  { name: 'LINK',   address: '0xf97f4df75117a78c1A5a0DBb814Af92458539FB4', decimals: 18, liquidationBonusRatio: 1.07 },
-  { name: 'AAVE',   address: '0xba5DdD1f9d7F570dc94a51479a000E3BCE967196', decimals: 18, liquidationBonusRatio: 1.075 },
-  { name: 'FRAX',   address: '0x17FC002b466eEc40DaE837fc4bE5c67993ddBd6F', decimals: 18, liquidationBonusRatio: 1.055 },
-  { name: 'LUSD',   address: '0x93b346b6BC2548dA6A1E7d98E9a421B42541425b', decimals: 18, liquidationBonusRatio: 1.055 }
+  { name: 'DAI',    address: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1', decimals: 18, liquidationBonusRatio: 1.05,  reserveId: 0 },
+  { name: 'LINK',   address: '0xf97f4df75117a78c1A5a0DBb814Af92458539FB4', decimals: 18, liquidationBonusRatio: 1.07,  reserveId: 1 },
+  { name: 'USDC.e', address: '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8', decimals: 6,  liquidationBonusRatio: 1.05,  reserveId: 2 },
+  { name: 'WBTC',   address: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f', decimals: 8,  liquidationBonusRatio: 1.065, reserveId: 3 },
+  { name: 'WETH',   address: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', decimals: 18, liquidationBonusRatio: 1.05,  reserveId: 4 },
+  { name: 'USDT',   address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', decimals: 6,  liquidationBonusRatio: 1.05,  reserveId: 5 },
+  { name: 'AAVE',   address: '0xba5DdD1f9d7F570dc94a51479a000E3BCE967196', decimals: 18, liquidationBonusRatio: 1.075, reserveId: 6 },
+  { name: 'wstETH', address: '0x5979D7b546E38E414F7E9822514be443A4800529', decimals: 18, liquidationBonusRatio: 1.07,  reserveId: 8 },
+  { name: 'rETH',   address: '0xEC70Dcb4A1EFa46b8F2D97C310C9c4790ba5ffA8', decimals: 18, liquidationBonusRatio: 1.075, reserveId: 10 },
+  { name: 'LUSD',   address: '0x93b346b6BC2548dA6A1E7d98E9a421B42541425b', decimals: 18, liquidationBonusRatio: 1.055, reserveId: 11 },
+  { name: 'USDC',   address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6,  liquidationBonusRatio: 1.045, reserveId: 12 },
+  { name: 'FRAX',   address: '0x17FC002b466eEc40DaE837fc4bE5c67993ddBd6F', decimals: 18, liquidationBonusRatio: 1.055, reserveId: 13 },
+  { name: 'ARB',    address: '0x912CE59144191C1204E64559FE8253a0e49E6548', decimals: 18, liquidationBonusRatio: 1.10,  reserveId: 14 },
+  { name: 'weETH',  address: '0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe', decimals: 18, liquidationBonusRatio: 1.075, reserveId: 15 }
 ];
 
 const getAllReservesTokensAbi = parseAbiItem(
@@ -168,6 +178,12 @@ const getAllReservesTokensAbi = parseAbiItem(
 );
 const getReserveConfigurationDataAbi = parseAbiItem(
   'function getReserveConfigurationData(address asset) view returns (uint256 decimals, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus, uint256 reserveFactor, bool usageAsCollateralEnabled, bool borrowingEnabled, bool stableBorrowRateEnabled, bool isActive, bool isFrozen)'
+);
+const getEModeCategoryDataAbi = parseAbiItem(
+  'function getEModeCategoryData(uint8 id) view returns ((uint16 ltv, uint16 liquidationThreshold, uint16 liquidationBonus, address priceSource, string label))'
+);
+const getEModeCategoryCollateralBitmapAbi = parseAbiItem(
+  'function getEModeCategoryCollateralBitmap(uint8 id) view returns (uint128)'
 );
 const getUserAccountDataAbi = parseAbiItem(
   'function getUserAccountData(address user) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)'
@@ -184,12 +200,15 @@ const liquidationCallEventAbi = parseAbiItem(
   'event LiquidationCall(address indexed collateralAsset, address indexed debtAsset, address indexed user, uint256 debtToCover, uint256 liquidatedCollateralAmount, address liquidator, bool receiveAToken)'
 );
 const botContractAbi = parseAbi([
+  'function owner() external view returns (address)',
+  'function profitRecipient() external view returns (address)',
+  'function setProfitRecipient(address _newProfitRecipient) external',
   'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover) external',
   'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover, uint24 poolFee) external',
   'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover, uint24 poolFee, uint256 minProfit) external'
 ]);
 
-// Aave ProtocolDataProvider üzerinden tüm aktif rezervleri, ondalık basamaklarını ve gerçek tasfiye bonuslarını dinamik çeker.
+// Aave ProtocolDataProvider üzerinden tüm aktif rezervleri, ondalık basamaklarını, gerçek tasfiye bonuslarını ve eMode kategori bitmap'lerini dinamik çeker.
 async function syncDynamicReservesFromProtocol() {
   try {
     const rawTokens = (await publicClient.readContract({
@@ -200,12 +219,27 @@ async function syncDynamicReservesFromProtocol() {
 
     if (!rawTokens || rawTokens.length === 0) return;
 
-    const configContracts = rawTokens.map(t => ({
-      address: AAVE_DATA_PROVIDER_ADDRESS,
-      abi: [getReserveConfigurationDataAbi] as const,
-      functionName: 'getReserveConfigurationData' as const,
-      args: [t.tokenAddress] as const
-    }));
+    const eModeIds = Array.from({ length: 16 }, (_, idx) => idx + 1);
+    const configContracts = [
+      ...rawTokens.map(t => ({
+        address: AAVE_DATA_PROVIDER_ADDRESS,
+        abi: [getReserveConfigurationDataAbi] as const,
+        functionName: 'getReserveConfigurationData' as const,
+        args: [t.tokenAddress] as const
+      })),
+      ...eModeIds.map(id => ({
+        address: AAVE_POOL_ADDRESS,
+        abi: [getEModeCategoryDataAbi] as const,
+        functionName: 'getEModeCategoryData' as const,
+        args: [id] as const
+      })),
+      ...eModeIds.map(id => ({
+        address: AAVE_POOL_ADDRESS,
+        abi: [getEModeCategoryCollateralBitmapAbi] as const,
+        functionName: 'getEModeCategoryCollateralBitmap' as const,
+        args: [id] as const
+      }))
+    ];
 
     const configResults = await publicClient.multicall({
       contracts: configContracts,
@@ -236,15 +270,42 @@ async function syncDynamicReservesFromProtocol() {
           name: token.symbol,
           address: getAddress(token.tokenAddress),
           decimals: Number(decimals),
-          liquidationBonusRatio: bonusNum >= 1.01 ? bonusNum : 1.05
+          liquidationBonusRatio: bonusNum >= 1.01 ? bonusNum : 1.05,
+          reserveId: i
         });
+      }
+    }
+
+    const dataOffset = rawTokens.length;
+    const bitmapOffset = rawTokens.length + eModeIds.length;
+    for (let j = 0; j < eModeIds.length; j++) {
+      const id = eModeIds[j];
+      const dataRes = configResults[dataOffset + j];
+      const bitmapRes = configResults[bitmapOffset + j];
+      if (dataRes?.status === 'success' && dataRes.result && bitmapRes?.status === 'success') {
+        const catData = dataRes.result as {
+          ltv: number;
+          liquidationThreshold: number;
+          liquidationBonus: number;
+          priceSource: `0x${string}`;
+          label: string;
+        };
+        const bitmap = BigInt(bitmapRes.result as bigint);
+        if (catData.liquidationBonus > 10000 && bitmap > 0n) {
+          eModeCategories.set(id, {
+            id,
+            bonusRatio: Number(catData.liquidationBonus) / 10000,
+            collateralBitmap: bitmap,
+            label: catData.label
+          });
+        }
       }
     }
 
     if (discovered.length >= 10) {
       AAVE_RESERVE_ASSETS = discovered;
       logInfo(
-        `Synchronized ${discovered.length} active Aave V3 reserves dynamically (${discovered.map(d => d.name).join(', ')}).`
+        `Synchronized ${discovered.length} active Aave V3 reserves and ${eModeCategories.size} eMode categories dynamically (${discovered.map(d => d.name).join(', ')}).`
       );
     }
   } catch (err: any) {
@@ -464,10 +525,21 @@ async function getLiquidationCandidates(
     userDebts.sort((a, b) => b.usd - a.usd);
     userCollaterals.sort((a, b) => b.usd - a.usd);
 
+    const eModeCat = userEMode > 0n ? eModeCategories.get(Number(userEMode)) : undefined;
+
     const candidates: LiquidationCandidate[] = [];
     for (const d of userDebts) {
       for (const c of userCollaterals) {
         if (d.asset.address.toLowerCase() !== c.asset.address.toLowerCase()) {
+          // Aave v3.3 kuralı: eMode bonusu yalnızca o eMode kategorisinin collateralBitmap'ine dahil olan teminatlarda geçerlidir
+          const isCollateralInEMode =
+            eModeCat !== undefined &&
+            c.asset.reserveId >= 0 &&
+            ((eModeCat.collateralBitmap >> BigInt(c.asset.reserveId)) & 1n) === 1n;
+          const effectiveBonusRatio = isCollateralInEMode
+            ? eModeCat.bonusRatio
+            : c.asset.liquidationBonusRatio;
+
           candidates.push({
             debtAsset: d.asset.address,
             debtName: d.asset.name,
@@ -478,8 +550,7 @@ async function getLiquidationCandidates(
             collateralAsset: c.asset.address,
             collateralName: c.asset.name,
             collateralUSD: c.usd,
-            // Kullanıcı eMode içindeyse (ör. ETH-Correlated / Stablecoin eMode) tasfiye bonusu ~%1 (1.01) olur
-            liquidationBonusRatio: userEMode > 0n ? 1.01 : c.asset.liquidationBonusRatio
+            liquidationBonusRatio: effectiveBonusRatio
           });
         }
       }
@@ -553,16 +624,21 @@ async function executeLiquidationStrike(
   const estimatedGasCostUSD = Math.max(0.02, cachedGasPriceGwei * 0.0009 * cachedEthPriceUSD);
 
   for (const target of candidates) {
-    let fullDebtToCover = healthFactor <= 0.95 ? target.debtAmount : target.debtAmount / 2n;
-    let fullCoverUSD = healthFactor <= 0.95 ? target.debtUSD : target.debtUSD / 2;
+    // Aave v3.3'te HF <= 0.95 veya borç/teminat < $2,000 olduğunda %100 kapatma uygulanır.
+    // Bloklar arası faiz birikimi veya rayMul yuvarlaması yüzünden birkaç wei borç kalıp MustNotLeaveDust revert'ü oluşmaması için
+    // tam kapatmada +%0.1 (1001n/1000n) tampon eklenir; Aave fazlalığı keser ve sözleşmedeki unspentAsset bunu otomatik dengeler.
+    const canClose100Percent =
+      healthFactor <= 0.95 || target.debtUSD < 2000 || target.collateralUSD < 2000;
+    let fullDebtToCover = canClose100Percent
+      ? (target.debtAmount * 1001n) / 1000n
+      : target.debtAmount / 2n;
+    let fullCoverUSD = canClose100Percent ? target.debtUSD : target.debtUSD / 2;
 
-    // Aave v3.3 MustNotLeaveDust kuralına takılmamak için +%0.5 kırpma yapmadan doğrudan gerçek bonus oranıyla sınırla
-    // (Sözleşmedeki unspentAsset + finalBalance kontrolü Aave'nin kullanmadığı flaş krediyi otomatik dengeler)
     const maxCoverableByCollateralUSD = target.collateralUSD / target.liquidationBonusRatio;
 
     if (fullCoverUSD > maxCoverableByCollateralUSD) {
-      const scaleRatio = BigInt(Math.floor((maxCoverableByCollateralUSD / fullCoverUSD) * 10000));
-      fullDebtToCover = (fullDebtToCover * scaleRatio) / 10000n;
+      const scaleRatio = BigInt(Math.floor((maxCoverableByCollateralUSD / target.debtUSD) * 10010));
+      fullDebtToCover = (target.debtAmount * scaleRatio) / 10000n;
       fullCoverUSD = maxCoverableByCollateralUSD;
     }
 
@@ -904,6 +980,38 @@ async function main() {
   loadMonitoredUsers();
   await refreshExecutionParams();
 
+  try {
+    const currentRecipient = (await publicClient.readContract({
+      address: OUR_BOT_CONTRACT_ADDRESS,
+      abi: botContractAbi,
+      functionName: 'profitRecipient'
+    })) as `0x${string}`;
+    const desiredRecipientRaw = (process.env.PROFIT_RECIPIENT_ADDRESS || '').trim().toLowerCase();
+    if (desiredRecipientRaw && isAddress(desiredRecipientRaw)) {
+      const desiredRecipient = getAddress(desiredRecipientRaw);
+      if (currentRecipient.toLowerCase() !== desiredRecipient.toLowerCase()) {
+        logInfo(`Updating on-chain profitRecipient from ${currentRecipient} to ${desiredRecipient}...`);
+        const txHash = await broadcastWalletClients[0].writeContract({
+          address: OUR_BOT_CONTRACT_ADDRESS,
+          abi: botContractAbi,
+          functionName: 'setProfitRecipient',
+          args: [desiredRecipient],
+          account,
+          chain: chainToUse
+        });
+        await publicClient.waitForTransactionReceipt({ hash: txHash });
+        await refreshExecutionParams();
+        logInfo(`Updated on-chain profitRecipient to ${desiredRecipient} (Tx: ${txHash})`);
+      } else {
+        logInfo(`Verified Contract Security | Hot Executor: ${account.address} | Cold Profit Vault: ${currentRecipient}`);
+      }
+    } else {
+      logInfo(`Verified Contract Roles | Executor: ${account.address} | Profit Vault: ${currentRecipient}`);
+    }
+  } catch (err: any) {
+    logThrottledWarn('profit_recipient_check', `Could not verify profitRecipient on startup: ${err.shortMessage || err.message}`);
+  }
+
   const currentBlock = await getBlockNumberWithRetry();
   logInfo(`Connected to Arbitrum Network. Current Block: ${currentBlock}`);
 
@@ -914,82 +1022,90 @@ async function main() {
   // Arka planda geçmiş bloklardaki borçluları (onBehalfOf) senkronize et
   syncRecentBorrowers(currentBlock);
 
-  // Canlı ağda gerçekleşen yeni Borrow ve LiquidationCall olaylarını eth_getFilterChanges kullanmadan (stateless getLogs ile) izle
+  // Canlı ağda gerçekleşen yeni Borrow ve LiquidationCall olaylarını üst üste binmeyen (non-overlapping) ardışık getLogs döngüsüyle izle
   let lastEventBlock = currentBlock;
-  setInterval(async () => {
+  async function pollLiveEventsLoop() {
     let lastErr: any = null;
-    for (const client of readClients) {
-      try {
-        const latestBlock = await client.getBlockNumber();
-        if (latestBlock <= lastEventBlock) return;
+    try {
+      for (const client of readClients) {
+        try {
+          const latestBlock = await client.getBlockNumber();
+          if (latestBlock <= lastEventBlock) {
+            lastErr = null;
+            break;
+          }
 
-        // Bağlantı kesintisinde hiçbir bloğu atlamamak için ileriye doğru en fazla 2000 blokluk dilimlerle ilerle
-        const fromBlock = lastEventBlock + 1n;
-        const toBlock = fromBlock + 2000n < latestBlock ? fromBlock + 2000n : latestBlock;
+          // Bağlantı kesintisinde hiçbir bloğu atlamamak için ileriye doğru en fazla 2000 blokluk dilimlerle ilerle
+          const fromBlock = lastEventBlock + 1n;
+          const toBlock = fromBlock + 2000n < latestBlock ? fromBlock + 2000n : latestBlock;
 
-        const [borrowLogs, liqLogs] = await Promise.all([
-          client.getLogs({
-            address: AAVE_POOL_ADDRESS,
-            event: borrowEventAbi,
-            fromBlock,
-            toBlock
-          }),
-          client.getLogs({
-            address: AAVE_POOL_ADDRESS,
-            event: liquidationCallEventAbi,
-            fromBlock,
-            toBlock
-          })
-        ]);
+          const [borrowLogs, liqLogs] = await Promise.all([
+            client.getLogs({
+              address: AAVE_POOL_ADDRESS,
+              event: borrowEventAbi,
+              fromBlock,
+              toBlock
+            }),
+            client.getLogs({
+              address: AAVE_POOL_ADDRESS,
+              event: liquidationCallEventAbi,
+              fromBlock,
+              toBlock
+            })
+          ]);
 
-        lastEventBlock = toBlock;
+          lastEventBlock = toBlock;
 
-        let newUsersAdded = 0;
-        for (const log of borrowLogs) {
-          const borrower = log.args?.onBehalfOf || log.args?.user;
-          if (borrower && isAddress(borrower)) {
-            const checksummed = getAddress(borrower);
-            if (!activeUsers.has(checksummed)) {
-              activeUsers.add(checksummed);
-              newUsersAdded++;
-              logInfo(`New borrower detected on-chain (onBehalfOf): ${checksummed}`);
+          let newUsersAdded = 0;
+          for (const log of borrowLogs) {
+            const borrower = log.args?.onBehalfOf || log.args?.user;
+            if (borrower && isAddress(borrower)) {
+              const checksummed = getAddress(borrower);
+              if (!activeUsers.has(checksummed)) {
+                activeUsers.add(checksummed);
+                newUsersAdded++;
+                logInfo(`New borrower detected on-chain (onBehalfOf): ${checksummed}`);
+                checkUsersBatch([checksummed], true);
+              }
+            }
+          }
+          if (newUsersAdded > 0) {
+            scheduleSaveUsers();
+          }
+
+          for (const log of liqLogs) {
+            const user = log.args?.user;
+            const liquidator = log.args?.liquidator;
+            if (user && isAddress(user)) {
+              const checksummed = getAddress(user);
+              const inRadar = activeUsers.has(checksummed);
+              logAlert(
+                `ON-CHAIN LIQUIDATION OBSERVED | User: ${checksummed} | In Our Radar: ${inRadar ? 'YES' : 'NO'} | Liquidator: ${liquidator}`
+              );
+              if (!inRadar) {
+                activeUsers.add(checksummed);
+                scheduleSaveUsers();
+              }
               checkUsersBatch([checksummed], true);
             }
           }
+          lastErr = null;
+          break;
+        } catch (err: any) {
+          lastErr = err;
         }
-        if (newUsersAdded > 0) {
-          scheduleSaveUsers();
-        }
-
-        for (const log of liqLogs) {
-          const user = log.args?.user;
-          const liquidator = log.args?.liquidator;
-          if (user && isAddress(user)) {
-            const checksummed = getAddress(user);
-            const inRadar = activeUsers.has(checksummed);
-            logAlert(
-              `ON-CHAIN LIQUIDATION OBSERVED | User: ${checksummed} | In Our Radar: ${inRadar ? 'YES' : 'NO'} | Liquidator: ${liquidator}`
-            );
-            if (!inRadar) {
-              activeUsers.add(checksummed);
-              scheduleSaveUsers();
-            }
-            checkUsersBatch([checksummed], true);
-          }
-        }
-        lastErr = null;
-        break;
-      } catch (err: any) {
-        lastErr = err;
       }
+      if (lastErr) {
+        logThrottledWarn(
+          'poll_events',
+          `Event polling failed across all RPCs: ${lastErr.shortMessage || lastErr.message}`
+        );
+      }
+    } finally {
+      setTimeout(pollLiveEventsLoop, 10000);
     }
-    if (lastErr) {
-      logThrottledWarn(
-        'poll_events',
-        `Event polling failed across all RPCs: ${lastErr.shortMessage || lastErr.message}`
-      );
-    }
-  }, 10000);
+  }
+  pollLiveEventsLoop();
 
   logInfo(
     `Starting 3-tier Multi-RPC radar loops (250ms / 2.5s / 15s). Monitoring ${activeUsers.size} addresses across ${AAVE_RESERVE_ASSETS.length} reserves.`

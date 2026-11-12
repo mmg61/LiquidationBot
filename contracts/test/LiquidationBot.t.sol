@@ -3,7 +3,13 @@ pragma solidity ^0.8.10;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {LiquidationBot, ISwapRouter} from "../src/LiquidationBot.sol";
+import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+interface IAaveOracle {
+    function getAssetPrice(address asset) external view returns (uint256);
+}
 
 contract MockERC20 is ERC20 {
     uint8 private _dec;
@@ -234,5 +240,60 @@ contract LiquidationBotTest is Test {
         );
 
         assertEq(debtToken.balanceOf(coldProfitWallet), 14_500_000);
+    }
+
+    function test_Fork_RealArbitrum_AaveV3_And_UniswapV3_Liquidation() public {
+        string memory rpc = vm.envOr("ARBITRUM_RPC_URL", string("https://arb1.arbitrum.io/rpc"));
+        vm.createSelectFork(rpc, 523663596);
+
+        address aaveProvider = 0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb;
+        address aavePool = 0x794a61358D6845594F94dc1DB02A252b5b4814aD;
+        address aaveOracle = 0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7;
+        address uniRouter = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+
+        address weth = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
+        address usdt = 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9;
+
+        LiquidationBot forkBot = new LiquidationBot(aaveProvider, uniRouter);
+        forkBot.setProfitRecipient(coldProfitWallet);
+
+        // 1. Wrap 3 ETH into real WETH on Arbitrum and supply as collateral on Aave V3 Pool
+        uint256 collateralAmount = 3 ether;
+        vm.deal(borrower, collateralAmount);
+
+        vm.startPrank(borrower);
+        (bool wrapped, ) = weth.call{value: collateralAmount}(abi.encodeWithSignature("deposit()"));
+        require(wrapped, "WETH deposit failed");
+        IERC20(weth).approve(aavePool, collateralAmount);
+        IPool(aavePool).supply(weth, collateralAmount, borrower, 0);
+
+        uint256 wethPrice = IAaveOracle(aaveOracle).getAssetPrice(weth); // 8 decimals
+        // Borrow ~72% LTV in USDT (6 decimals): (3e18 * wethPrice / 1e18) * 72 / 100 / 100
+        uint256 borrowAmountUSDT = ((collateralAmount * wethPrice) / 1e18) * 72 / 10000;
+        IPool(aavePool).borrow(usdt, borrowAmountUSDT, 2, 0, borrower);
+        vm.stopPrank();
+
+        // 2. Simulate 20% WETH price drop on Aave Oracle so real Aave V3 HF drops below 1.0
+        uint256 crashedWethPrice = (wethPrice * 80) / 100;
+        vm.mockCall(
+            aaveOracle,
+            abi.encodeWithSelector(IAaveOracle.getAssetPrice.selector, weth),
+            abi.encode(crashedWethPrice)
+        );
+
+        (, , , , , uint256 hfAfterCrash) = IPool(aavePool).getUserAccountData(borrower);
+        assertLt(hfAfterCrash, 1e18, "Real Aave V3 borrower HF must be < 1.0");
+
+        // 3. Verify that an excessive minProfit (10,000 USDT) reverts on the real fork
+        vm.expectRevert();
+        forkBot.triggerLiquidation(usdt, weth, borrower, borrowAmountUSDT / 2, 500, 10_000 * 1e6);
+
+        // 4. Execute real flashLoanSimple + liquidationCall + Uniswap V3 swap with unspentAsset (+1% buffer over accrued debt so Aave caps at 100% debt with 0 dust) + minProfit = 1 USDT
+        uint256 profitBefore = IERC20(usdt).balanceOf(coldProfitWallet);
+        forkBot.triggerLiquidation(usdt, weth, borrower, (borrowAmountUSDT * 101) / 100, 500, 1 * 1e6);
+        uint256 profitAfter = IERC20(usdt).balanceOf(coldProfitWallet);
+
+        assertGt(profitAfter - profitBefore, 1 * 1e6, "Net profit must exceed minProfit and arrive at coldProfitWallet");
+        console2.log("Real Arbitrum Fork Net Profit (USDT 6 dec):", profitAfter - profitBefore);
     }
 }
