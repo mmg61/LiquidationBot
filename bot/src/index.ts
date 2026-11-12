@@ -120,12 +120,17 @@ const AAVE_POOL_ADDRESS = '0x794a61358D6845594F94dc1DB02A252b5b4814aD' as const;
 const AAVE_DATA_PROVIDER_ADDRESS = '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654' as const;
 const AAVE_ORACLE_ADDRESS = '0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7' as const;
 
-const rawBotContractAddr = (process.env.BOT_CONTRACT_ADDRESS || '').trim().toLowerCase();
+const rawBotContractAddr = (
+  process.env.BOT_CONTRACT_ADDRESS || '0x1CA5f9cACbee5533E03FD643E2d4BC89af667c6c'
+)
+  .trim()
+  .toLowerCase();
 if (!rawBotContractAddr || !isAddress(rawBotContractAddr)) {
   throw new Error('FATAL: Valid BOT_CONTRACT_ADDRESS is required in .env');
 }
 const OUR_BOT_CONTRACT_ADDRESS = getAddress(rawBotContractAddr);
 let cachedEthPriceUSD = 2600;
+let lastValidOraclePrices: { prices: bigint[]; updatedAt: number; count: number } | null = null;
 
 // MİKRO BORÇ VE SIFIR ZARAR FİLTRELERİ:
 const MIN_DEBT_USD = 50.0;
@@ -451,11 +456,26 @@ async function getLiquidationCandidates(
           | null;
         if (candidatePrices && candidatePrices.length === reservesSnapshot.length) {
           pricesRaw = candidatePrices;
+          lastValidOraclePrices = {
+            prices: candidatePrices,
+            updatedAt: Date.now(),
+            count: reservesSnapshot.length
+          };
           break;
         }
       } catch {
         // Sıradaki RPC ile tekrar dene
       }
+    }
+
+    // Anlık RPC kesintisinde son 30 saniye içinde alınmış taze Oracle fiyatı varsa onu kullan
+    if (
+      (!pricesRaw || pricesRaw.length !== reservesSnapshot.length) &&
+      lastValidOraclePrices &&
+      lastValidOraclePrices.count === reservesSnapshot.length &&
+      Date.now() - lastValidOraclePrices.updatedAt < 30000
+    ) {
+      pricesRaw = lastValidOraclePrices.prices;
     }
 
     // ORACLE KORUMASI: Tüm RPC'lerde fiyat verisi alınamadıysa yanlış varsayılan (1.0$) kullanmak yerine değerlendirmeyi durdur.
