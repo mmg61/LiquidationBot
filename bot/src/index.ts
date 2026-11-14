@@ -1343,66 +1343,89 @@ async function main() {
     0
   );
 
-  // Canlı WebSocket (WSS) Blok + Chainlink Oracle Fiyat Tetikleyicisi
+  // Canlı WebSocket (WSS) Blok + Chainlink Oracle Fiyat Tetikleyicisi (Otomatik Yeniden Abonelik Korumalı)
   if (!process.env.LOCAL_FORK_URL) {
-    try {
-      const wsClient = createPublicClient({
-        chain: arbitrum,
-        transport: webSocket(arbitrumWssUrl, { reconnect: true, keepAlive: true })
-      });
-      let lastWsSweep = 0;
-      wsClient.watchBlockNumber({
-        onBlockNumber: () => {
-          const now = Date.now();
-          if (imminentTargets.size > 0 && now - lastWsSweep >= 150) {
-            lastWsSweep = now;
-            checkUsersBatch(Array.from(imminentTargets), true, true).catch(() => {});
-          }
-        },
-        onError: err => {
-          logThrottledWarn('wss_block', `WSS block watcher warning: ${err.message}`);
+    let wsReconnecting = false;
+    let unwatchBlock: (() => void) | null = null;
+    let unwatchChainlink: (() => void) | null = null;
+
+    const startRealtimeWebSocket = () => {
+      try {
+        if (unwatchBlock) {
+          try { unwatchBlock(); } catch {}
+          unwatchBlock = null;
         }
-      });
+        if (unwatchChainlink) {
+          try { unwatchChainlink(); } catch {}
+          unwatchChainlink = null;
+        }
 
-      // Chainlink AnswerUpdated Olay Tetikleyicisi: Fiyat değiştiği milisaniyede zamanlayıcıyı beklemeden tüm kritik hedefleri tarar
-      if (chainlinkAggregators.length > 0) {
-        let lastOracleSweep = 0;
-        wsClient.watchEvent({
-          address: chainlinkAggregators,
-          event: answerUpdatedEventAbi,
-          poll: false,
-          onLogs: logs => {
-            if (logs.length === 0) return;
-            lastValidOraclePrices = null; // Eski fiyat önbelleğini sıfırla
+        const wsClient = createPublicClient({
+          chain: arbitrum,
+          transport: webSocket(arbitrumWssUrl, { reconnect: true, keepAlive: true })
+        });
+
+        const handleWsDisconnect = (source: string, err: any) => {
+          const shortMsg = (err?.shortMessage || err?.message || 'Socket closed').split('\n')[0];
+          if ( wsReconnecting ) return;
+          wsReconnecting = true;
+          logInfo(`WebSocket (${source}) connection recycled (${shortMsg}). Re-subscribing in 3s...`);
+          setTimeout(() => {
+            wsReconnecting = false;
+            startRealtimeWebSocket();
+          }, 3000);
+        };
+
+        let lastWsSweep = 0;
+        unwatchBlock = wsClient.watchBlockNumber({
+          onBlockNumber: () => {
             const now = Date.now();
-            if (now - lastOracleSweep < 100) return;
-            lastOracleSweep = now;
-
-            if (imminentTargets.size > 0) {
+            if (imminentTargets.size > 0 && now - lastWsSweep >= 150) {
+              lastWsSweep = now;
               checkUsersBatch(Array.from(imminentTargets), true, true).catch(() => {});
             }
-            if (ultraCriticalTargets.size > 0) {
-              const nonImminent = Array.from(ultraCriticalTargets).filter(
-                u => !imminentTargets.has(u)
-              );
-              if (nonImminent.length > 0) {
-                checkUsersBatch(nonImminent, true, false).catch(() => {});
-              }
-            }
           },
-          onError: err => {
-            logThrottledWarn('wss_chainlink', `WSS Chainlink watcher warning: ${err.message}`);
-          }
+          onError: err => handleWsDisconnect('BlockWatcher', err)
         });
-        logInfo(
-          `WebSocket Real-Time Block & Chainlink Oracle Trigger (${chainlinkAggregators.length} feeds) active on ${arbitrumWssUrl}`
-        );
-      } else {
-        logInfo(`WebSocket Real-Time Block Trigger active on ${arbitrumWssUrl}`);
+
+        // Chainlink AnswerUpdated Olay Tetikleyicisi: Fiyat değiştiği milisaniyede zamanlayıcıyı beklemeden tüm kritik hedefleri tarar
+        if (chainlinkAggregators.length > 0) {
+          let lastOracleSweep = 0;
+          unwatchChainlink = wsClient.watchEvent({
+            address: chainlinkAggregators,
+            event: answerUpdatedEventAbi,
+            poll: false,
+            onLogs: logs => {
+              if (logs.length === 0) return;
+              lastValidOraclePrices = null; // Eski fiyat önbelleğini sıfırla
+              const now = Date.now();
+              if (now - lastOracleSweep < 100) return;
+              lastOracleSweep = now;
+
+              if (imminentTargets.size > 0) {
+                checkUsersBatch(Array.from(imminentTargets), true, true).catch(() => {});
+              }
+              if (ultraCriticalTargets.size > 0) {
+                const nonImminent = Array.from(ultraCriticalTargets).filter(
+                  u => !imminentTargets.has(u)
+                );
+                if (nonImminent.length > 0) {
+                  checkUsersBatch(nonImminent, true, false).catch(() => {});
+                }
+              }
+            },
+            onError: err => handleWsDisconnect('ChainlinkWatcher', err)
+          });
+        }
+      } catch (err: any) {
+        logThrottledWarn('wss_init', `Could not initialize WSS trigger: ${(err.message || '').split('\n')[0]}`);
       }
-    } catch (err: any) {
-      logThrottledWarn('wss_init', `Could not initialize WSS block trigger: ${err.message}`);
-    }
+    };
+
+    startRealtimeWebSocket();
+    logInfo(
+      `WebSocket Real-Time Block & Chainlink Oracle Trigger (${chainlinkAggregators.length} feeds) active on ${arbitrumWssUrl}`
+    );
   }
 
   ultraCriticalSniperLoop();
