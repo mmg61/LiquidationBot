@@ -15,9 +15,10 @@ import { arbitrum, localhost } from 'viem/chains';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as https from 'https';
 
-// Ortam değişkenlerini (.env dosyasından) yükler.
-dotenv.config();
+// Ortam değişkenlerini her zaman bot/.env dosyasından yükler (PM2 çalışma dizininden bağımsız).
+dotenv.config({ path: path.join(__dirname, '../.env') });
 
 // ============================================================================
 // 1. HİBRİT AĞ, ÇOKLU ÜCRETSİZ RPC HAVUZU VE ÖZEL SNIPER API YAPILANDIRMASI
@@ -171,29 +172,68 @@ let chainlinkAggregators: `0x${string}`[] = [
   '0xB72359B2dc04Ff363e094648DF78247c98297c20'  // ARB / USD
 ];
 
-const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
-const telegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
+const rawTelegramToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const telegramBotToken =
+  rawTelegramToken && !rawTelegramToken.includes('BURAYA_') ? rawTelegramToken : '';
+const rawTelegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
+let activeTelegramChatId =
+  /^-?\d+$/.test(rawTelegramChatId) ? rawTelegramChatId : '';
 const telegramThrottleMap = new Map<string, number>();
+
+function callTelegramApi(method: string, payload: Record<string, any>, timeoutMs = 10000): Promise<any> {
+  return new Promise(resolve => {
+    if (!telegramBotToken) return resolve(null);
+    const bodyStr = JSON.stringify(payload);
+    const req = https.request(
+      {
+        hostname: 'api.telegram.org',
+        port: 443,
+        path: `/bot${telegramBotToken}/${method}`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(bodyStr)
+        },
+        timeout: timeoutMs
+      },
+      res => {
+        let raw = '';
+        res.on('data', chunk => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(raw));
+          } catch {
+            resolve(null);
+          }
+        });
+      }
+    );
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.write(bodyStr);
+    req.end();
+  });
+}
 
 // Yalnızca gerçekleşen tasfiye işlemlerinde ve kritik sistem arızalarında kurumsal bildirim gönderir
 function sendTelegramAlert(key: string, message: string, minIntervalMs = 0) {
-  if (!telegramBotToken || !telegramChatId) return;
+  if (!telegramBotToken || !activeTelegramChatId) return;
   const now = Date.now();
   if (minIntervalMs > 0) {
     const last = telegramThrottleMap.get(key) || 0;
     if (now - last < minIntervalMs) return;
     telegramThrottleMap.set(key, now);
   }
-  fetch(`https://api.telegram.org/bot${telegramBotToken}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: telegramChatId,
-      text: message,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true
-    }),
-    signal: AbortSignal.timeout(5000)
+  callTelegramApi('sendMessage', {
+    chat_id: activeTelegramChatId,
+    text: message,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
   }).catch(() => {});
 }
 
@@ -1410,107 +1450,137 @@ function buildTelegramPanelView(tab: PanelTab): { text: string; reply_markup: an
 }
 
 function startTelegramControlPanel() {
-  if (!telegramBotToken) return;
+  if (!telegramBotToken) {
+    logInfo('Telegram Control Panel inactive (TELEGRAM_BOT_TOKEN is not set in .env).');
+    return;
+  }
 
-  // Telegram alt menü komutlarını kaydet
-  fetch(`https://api.telegram.org/bot${telegramBotToken}/setMyCommands`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      commands: [
-        { command: 'panel', description: 'Yönetim ve izleme panelini aç' },
-        { command: 'durum', description: 'Genel sistem durumu özeti' },
-        { command: 'riskli', description: 'Yüksek riskli borçlular tablosu' },
-        { command: 'tasfiyeler', description: 'Ağdaki son tasfiye işlemleri' },
-        { command: 'cuzdan', description: 'Cüzdan, gas ve soğuk kasa bilgileri' }
-      ]
-    }),
-    signal: AbortSignal.timeout(5000)
-  }).catch(() => {});
+  let botSelfId = '';
+
+  (async () => {
+    try {
+      await callTelegramApi('deleteWebhook', { drop_pending_updates: false }, 8000);
+      const me = await callTelegramApi('getMe', {}, 8000);
+      if (me?.ok && me?.result) {
+        botSelfId = String(me.result.id || '');
+        if (activeTelegramChatId && activeTelegramChatId === botSelfId) {
+          // Kullanıcı yanlışlıkla kendi ID'si yerine botun ID'sini yazdıysa sıfırla ki ilk mesajda gerçek ID otomatik algılansın
+          activeTelegramChatId = '';
+        }
+        logInfo(
+          `Telegram Bot connected: @${me.result.username} (ID: ${botSelfId}) | Waiting for /panel command...`
+        );
+      } else {
+        logThrottledWarn(
+          'tg_auth',
+          `Telegram token rejected by API: ${me?.description || 'Invalid TELEGRAM_BOT_TOKEN'}`
+        );
+      }
+      await callTelegramApi(
+        'setMyCommands',
+        {
+          commands: [
+            { command: 'panel', description: 'Yönetim ve izleme panelini aç' },
+            { command: 'durum', description: 'Genel sistem durumu özeti' },
+            { command: 'riskli', description: 'Yüksek riskli borçlular tablosu' },
+            { command: 'tasfiyeler', description: 'Ağdaki son tasfiye işlemleri' },
+            { command: 'cuzdan', description: 'Cüzdan, gas ve soğuk kasa bilgileri' }
+          ]
+        },
+        8000
+      );
+    } catch {
+      // Başlangıç kontrol hatasını geç
+    }
+  })();
 
   let updateOffset = 0;
 
   async function pollTelegramUpdates() {
     try {
-      const res = await fetch(
-        `https://api.telegram.org/bot${telegramBotToken}/getUpdates?offset=${updateOffset}&timeout=20`,
-        { signal: AbortSignal.timeout(25000) }
+      const data = await callTelegramApi(
+        'getUpdates',
+        { offset: updateOffset, timeout: 15 },
+        22000
       );
-      if (res.ok) {
-        const data = (await res.json()) as any;
-        if (data?.ok && Array.isArray(data.result)) {
-          for (const upd of data.result) {
-            updateOffset = upd.update_id + 1;
+      if (data?.ok && Array.isArray(data.result)) {
+        for (const upd of data.result) {
+          updateOffset = upd.update_id + 1;
 
-            if (upd.message && upd.message.text) {
-              const chatId = String(upd.message.chat?.id || '');
-              if (telegramChatId && chatId !== telegramChatId) continue;
+          if (upd.message) {
+            const chatId = String(upd.message.chat?.id || '');
+            if (!chatId) continue;
 
-              const cmd = String(upd.message.text).trim().toLowerCase();
-              let initialTab: PanelTab = 'overview';
-              if (cmd.startsWith('/riskli')) initialTab = 'borrowers';
-              else if (cmd.startsWith('/tasfiyeler')) initialTab = 'liquidations';
-              else if (cmd.startsWith('/cuzdan')) initialTab = 'wallet';
+            if (!activeTelegramChatId) {
+              activeTelegramChatId = chatId;
+              logInfo(`Telegram authorized Chat ID automatically bound to: ${chatId}`);
+            }
 
-              const view = buildTelegramPanelView(initialTab);
-              await fetch(`https://api.telegram.org/bot${telegramBotToken}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+            const cmd = String(upd.message.text || '/panel').trim().toLowerCase();
+            let initialTab: PanelTab = 'overview';
+            if (cmd.startsWith('/riskli')) initialTab = 'borrowers';
+            else if (cmd.startsWith('/tasfiyeler')) initialTab = 'liquidations';
+            else if (cmd.startsWith('/cuzdan')) initialTab = 'wallet';
+
+            const view = buildTelegramPanelView(initialTab);
+            await callTelegramApi(
+              'sendMessage',
+              {
+                chat_id: chatId,
+                text: view.text,
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: view.reply_markup
+              },
+              8000
+            );
+          } else if (upd.callback_query) {
+            const cb = upd.callback_query;
+            const chatId = String(cb.message?.chat?.id || '');
+            const messageId = cb.message?.message_id;
+            if (!chatId || !messageId) continue;
+
+            if (!activeTelegramChatId) {
+              activeTelegramChatId = chatId;
+            }
+
+            const dataStr = String(cb.data || '');
+            let targetTab: PanelTab = 'overview';
+            if (dataStr.endsWith('borrowers')) targetTab = 'borrowers';
+            else if (dataStr.endsWith('liquidations')) targetTab = 'liquidations';
+            else if (dataStr.endsWith('wallet')) targetTab = 'wallet';
+
+            const view = buildTelegramPanelView(targetTab);
+
+            await Promise.allSettled([
+              callTelegramApi(
+                'editMessageText',
+                {
                   chat_id: chatId,
+                  message_id: messageId,
                   text: view.text,
                   parse_mode: 'HTML',
                   disable_web_page_preview: true,
                   reply_markup: view.reply_markup
-                }),
-                signal: AbortSignal.timeout(5000)
-              }).catch(() => {});
-            } else if (upd.callback_query) {
-              const cb = upd.callback_query;
-              const chatId = String(cb.message?.chat?.id || '');
-              const messageId = cb.message?.message_id;
-              if (telegramChatId && chatId !== telegramChatId) continue;
-
-              const dataStr = String(cb.data || '');
-              let targetTab: PanelTab = 'overview';
-              if (dataStr.endsWith('borrowers')) targetTab = 'borrowers';
-              else if (dataStr.endsWith('liquidations')) targetTab = 'liquidations';
-              else if (dataStr.endsWith('wallet')) targetTab = 'wallet';
-
-              const view = buildTelegramPanelView(targetTab);
-
-              await Promise.allSettled([
-                fetch(`https://api.telegram.org/bot${telegramBotToken}/editMessageText`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    chat_id: chatId,
-                    message_id: messageId,
-                    text: view.text,
-                    parse_mode: 'HTML',
-                    disable_web_page_preview: true,
-                    reply_markup: view.reply_markup
-                  }),
-                  signal: AbortSignal.timeout(5000)
-                }),
-                fetch(`https://api.telegram.org/bot${telegramBotToken}/answerCallbackQuery`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    callback_query_id: cb.id,
-                    text: 'Panel verileri güncellendi.'
-                  }),
-                  signal: AbortSignal.timeout(5000)
-                })
-              ]);
-            }
+                },
+                8000
+              ),
+              callTelegramApi(
+                'answerCallbackQuery',
+                {
+                  callback_query_id: cb.id,
+                  text: 'Panel verileri güncellendi.'
+                },
+                5000
+              )
+            ]);
           }
         }
       }
     } catch {
       // Bağlantı zaman aşımında sessizce sonraki tura geç
     } finally {
-      setTimeout(pollTelegramUpdates, 1500);
+      setTimeout(pollTelegramUpdates, 1000);
     }
   }
 
@@ -1524,6 +1594,8 @@ async function main() {
   console.log('==================================================');
 
   loadMonitoredUsers();
+  // Telegram panelini RPC aramalarını beklemeden ilk saniyede başlat
+  startTelegramControlPanel();
   await refreshExecutionParams();
 
   try {
@@ -1567,9 +1639,6 @@ async function main() {
   // Aave V3 üzerindeki tüm aktif rezervleri ve gerçek tasfiye bonuslarını dinamik çek (ve her 30 dakikada bir yenile)
   await syncDynamicReservesFromProtocol();
   setInterval(syncDynamicReservesFromProtocol, 30 * 60 * 1000);
-
-  // Telegram etkileşimli yönetim panelini başlat (Otomatik açılış mesajı göndermez; yalnızca komut geldiğinde veya tasfiye/hata anında yazar)
-  startTelegramControlPanel();
 
   // Arka planda geçmiş bloklardaki borçluları (onBehalfOf) senkronize et
   syncRecentBorrowers(currentBlock);
