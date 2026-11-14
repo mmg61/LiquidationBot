@@ -2,6 +2,7 @@ import {
   createPublicClient,
   createWalletClient,
   http,
+  webSocket,
   fallback,
   parseAbiItem,
   parseAbi,
@@ -19,10 +20,14 @@ import * as path from 'path';
 dotenv.config();
 
 // ============================================================================
-// 1. AĞ, ÇOKLU RPC HAVUZU VE CÜZDAN YAPILANDIRMASI
+// 1. HİBRİT AĞ, ÇOKLU ÜCRETSİZ RPC HAVUZU VE ÖZEL SNIPER API YAPILANDIRMASI
 // ============================================================================
 const primaryRpcUrl =
   process.env.LOCAL_FORK_URL || process.env.ARBITRUM_RPC_URL || 'https://arb1.arbitrum.io/rpc';
+
+// Özel Keskin Nişancı API (Alchemy): Sadece HF < 1.012, simulateContract ve işlem yayını anında kullanılır (Ücretsiz kotayı korur)
+const sniperRpcUrl = process.env.SNIPER_RPC_URL || primaryRpcUrl;
+const arbitrumWssUrl = process.env.ARBITRUM_WSS_URL || 'wss://arbitrum-one-rpc.publicnode.com';
 
 const privateKey = process.env.PRIVATE_KEY;
 if (!privateKey) {
@@ -35,7 +40,7 @@ const account = privateKeyToAccount(
 );
 const chainToUse = process.env.LOCAL_FORK_URL ? localhost : arbitrum;
 
-// Viem fallback transport ile otomatik yedekli ana okuma istemcisi
+// Viem fallback transport ile otomatik yedekli genel okuma istemcisi
 const publicClient = createPublicClient({
   chain: chainToUse,
   transport: process.env.LOCAL_FORK_URL
@@ -43,11 +48,24 @@ const publicClient = createPublicClient({
     : fallback([
         http(primaryRpcUrl, { timeout: 10000 }),
         http('https://arbitrum-one-rpc.publicnode.com', { timeout: 10000 }),
+        http('https://arbitrum.drpc.org', { timeout: 10000 }),
         http('https://arb1.arbitrum.io/rpc', { timeout: 10000 })
       ])
 });
 
-// Çoklu Okuma Havuzu (Round-Robin): 250ms (blok hızı) taramalarda tek bir RPC'nin kotasını doldurmamak için yükü dağıtır.
+// Özel Keskin Nişancı İstemcisi (Sniper Client): Vuruş ve simülasyon anında en düşük gecikmeli özel Alchemy düğümünü kullanır
+const sniperClient = createPublicClient({
+  chain: chainToUse,
+  transport: process.env.LOCAL_FORK_URL
+    ? http(primaryRpcUrl, { timeout: 8000 })
+    : fallback([
+        http(sniperRpcUrl, { timeout: 6000 }),
+        http('https://arb1.arbitrum.io/rpc', { timeout: 6000 }),
+        http('https://arbitrum-one-rpc.publicnode.com', { timeout: 6000 })
+      ])
+});
+
+// Çoklu Ücretsiz Okuma Havuzu (Round-Robin): 3.800+ cüzdanlık taramalarda özel API kotasını hiç harcamadan yükü 4 ücretsiz düğüme dağıtır.
 const readClients = process.env.LOCAL_FORK_URL
   ? [publicClient]
   : [
@@ -61,7 +79,11 @@ const readClients = process.env.LOCAL_FORK_URL
       }),
       createPublicClient({
         chain: arbitrum,
-        transport: http('https://arb1.arbitrum.io/rpc', { timeout: 10000 })
+        transport: http('https://arbitrum.drpc.org', { timeout: 10000 })
+      }),
+      createPublicClient({
+        chain: arbitrum,
+        transport: http('https://1rpc.io/arb', { timeout: 10000 })
       })
     ];
 
@@ -72,7 +94,7 @@ function getNextReadClient() {
   return client;
 }
 
-// Çoklu Yazma (Broadcast) Havuzu: İşlemi aynı milisaniyede hem doğrudan Arbitrum Resmi Sequencer'ına hem de alternatif düğümlere ateşler.
+// Çoklu Yazma (Broadcast) Havuzu: İşlemi aynı milisaniyede hem doğrudan Arbitrum Resmi Sequencer'ına, hem Özel Alchemy düğümüne hem de alternatif düğümlere ateşler.
 const broadcastWalletClients = process.env.LOCAL_FORK_URL
   ? [createWalletClient({ account, chain: chainToUse, transport: http(primaryRpcUrl) })]
   : [
@@ -84,12 +106,17 @@ const broadcastWalletClients = process.env.LOCAL_FORK_URL
       createWalletClient({
         account,
         chain: arbitrum,
+        transport: http(sniperRpcUrl, { timeout: 8000 })
+      }),
+      createWalletClient({
+        account,
+        chain: arbitrum,
         transport: http('https://arbitrum-one-rpc.publicnode.com', { timeout: 8000 })
       }),
       createWalletClient({
         account,
         chain: arbitrum,
-        transport: http(primaryRpcUrl, { timeout: 8000 })
+        transport: http('https://arbitrum.drpc.org', { timeout: 8000 })
       })
     ];
 
@@ -327,6 +354,7 @@ const DATA_DIR = path.join(__dirname, '../data');
 const STORAGE_FILE = path.join(DATA_DIR, 'monitored_users.json');
 
 const activeUsers = new Set<`0x${string}`>();
+const imminentTargets = new Set<`0x${string}`>(); // HF < 1.012 (Özel Sniper API + WSS Blok Tetikleyicisi ile izlenir)
 const ultraCriticalTargets = new Set<`0x${string}`>();
 const criticalTargets = new Set<`0x${string}`>();
 const cooldowns = new Map<string, number>();
@@ -707,10 +735,10 @@ async function executeLiquidationStrike(
 
   if (plans.length === 0) return;
 
-  // PARALEL ÖN SİMÜLASYON (6 parametreli: debtAsset, collateralAsset, user, amount, poolFee=500, minProfit)
+  // PARALEL ÖN SİMÜLASYON (Özel Sniper API [Alchemy] üzerinden ~15ms gecikmeyle çalıştırılır)
   const simResults = await Promise.allSettled(
     plans.map(plan =>
-      publicClient.simulateContract({
+      sniperClient.simulateContract({
         address: OUR_BOT_CONTRACT_ADDRESS,
         abi: botContractAbi,
         functionName: 'triggerLiquidation',
@@ -821,6 +849,16 @@ async function processUserAccountData(
     totalDebtUSD >= MIN_DEBT_USD
   ) {
     criticalTargets.delete(userAddress);
+    if (healthFactor < 1.012) {
+      if (!imminentTargets.has(userAddress)) {
+        imminentTargets.add(userAddress);
+        logAlert(
+          `IMMINENT LIQUIDATION TARGET (Private Sniper API + WSS Block Lock) | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`
+        );
+      }
+    } else {
+      imminentTargets.delete(userAddress);
+    }
     if (!ultraCriticalTargets.has(userAddress)) {
       ultraCriticalTargets.add(userAddress);
       logAlert(
@@ -836,6 +874,7 @@ async function processUserAccountData(
     healthFactor <= CRITICAL_HF_THRESHOLD &&
     totalDebtUSD >= MIN_DEBT_USD
   ) {
+    imminentTargets.delete(userAddress);
     ultraCriticalTargets.delete(userAddress);
     if (!criticalTargets.has(userAddress)) {
       criticalTargets.add(userAddress);
@@ -844,6 +883,7 @@ async function processUserAccountData(
       );
     }
   } else {
+    imminentTargets.delete(userAddress);
     ultraCriticalTargets.delete(userAddress);
     criticalTargets.delete(userAddress);
     targetStrikeCache.delete(userAddress);
@@ -854,7 +894,11 @@ async function processUserAccountData(
   }
 }
 
-async function checkUsersBatch(addresses: `0x${string}`[], useFastPool = false) {
+async function checkUsersBatch(
+  addresses: `0x${string}`[],
+  useFastPool = false,
+  usePrivateSniper = false
+) {
   const now = Date.now();
   const eligibleAddresses = addresses.filter(
     addr => (!cooldowns.has(addr) || now >= cooldowns.get(addr)!) && !inFlightUsers.has(addr)
@@ -869,7 +913,11 @@ async function checkUsersBatch(addresses: `0x${string}`[], useFastPool = false) 
       args: [addr] as const
     }));
 
-    const client = useFastPool ? getNextReadClient() : publicClient;
+    const client = usePrivateSniper
+      ? sniperClient
+      : useFastPool
+        ? getNextReadClient()
+        : publicClient;
     const results = await client.multicall({ contracts, allowFailure: true });
 
     for (let i = 0; i < eligibleAddresses.length; i++) {
@@ -1128,8 +1176,35 @@ async function main() {
   pollLiveEventsLoop();
 
   logInfo(
-    `Starting 3-tier Multi-RPC radar loops (250ms / 2.5s / 15s). Monitoring ${activeUsers.size} addresses across ${AAVE_RESERVE_ASSETS.length} reserves.`
+    `Starting Hybrid Multi-RPC & Private Sniper loops (WSS Block Trigger + 250ms / 2.5s / 15s). Monitoring ${activeUsers.size} addresses across ${AAVE_RESERVE_ASSETS.length} reserves.`
   );
+
+  // Canlı WebSocket (WSS) Blok Tetikleyicisi: Yeni blok üretildiği milisaniyede HF < 1.012 olan hedefleri Özel Sniper API ile anında tarar
+  if (!process.env.LOCAL_FORK_URL) {
+    try {
+      const wsClient = createPublicClient({
+        chain: arbitrum,
+        transport: webSocket(arbitrumWssUrl, { reconnect: true, keepAlive: true })
+      });
+      let lastWsSweep = 0;
+      wsClient.watchBlockNumber({
+        onBlockNumber: () => {
+          const now = Date.now();
+          if (imminentTargets.size > 0 && now - lastWsSweep >= 150) {
+            lastWsSweep = now;
+            checkUsersBatch(Array.from(imminentTargets), true, true).catch(() => {});
+          }
+        },
+        onError: err => {
+          logThrottledWarn('wss_block', `WSS block watcher warning: ${err.message}`);
+        }
+      });
+      logInfo(`WebSocket Real-Time Block Trigger active on ${arbitrumWssUrl}`);
+    } catch (err: any) {
+      logThrottledWarn('wss_init', `Could not initialize WSS block trigger: ${err.message}`);
+    }
+  }
+
   ultraCriticalSniperLoop();
   criticalSniperLoop();
   generalRadarLoop();
