@@ -146,6 +146,38 @@ setInterval(refreshExecutionParams, 8000);
 const AAVE_POOL_ADDRESS = '0x794a61358D6845594F94dc1DB02A252b5b4814aD' as const;
 const AAVE_DATA_PROVIDER_ADDRESS = '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654' as const;
 const AAVE_ORACLE_ADDRESS = '0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7' as const;
+const UNISWAP_QUOTER_V2_ADDRESS = '0x61fFE014bA17989E743c5F6cB21bF9697530B21e' as const;
+
+// Arbitrum üzerindeki ana Chainlink fiyat kâhini (Aggregator) adresleri (Açılışta dinamik olarak tüm rezervlerle genişletilir)
+let chainlinkAggregators: `0x${string}`[] = [
+  '0xa5E1a36938769cbd5a26f5e19D8FCB379f597c83', // WETH / USD
+  '0xE7c522c60bA7f1b5E398D2312593713e2B19aeb0', // WBTC / USD
+  '0xB72359B2dc04Ff363e094648DF78247c98297c20'  // ARB / USD
+];
+
+const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const telegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
+const telegramThrottleMap = new Map<string, number>();
+
+function sendTelegramAlert(key: string, message: string, minIntervalMs = 0) {
+  if (!telegramBotToken || !telegramChatId) return;
+  const now = Date.now();
+  if (minIntervalMs > 0) {
+    const last = telegramThrottleMap.get(key) || 0;
+    if (now - last < minIntervalMs) return;
+    telegramThrottleMap.set(key, now);
+  }
+  fetch(`https://api.telegram.org/bot${telegramBotToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: telegramChatId,
+      text: message,
+      disable_web_page_preview: true
+    }),
+    signal: AbortSignal.timeout(5000)
+  }).catch(() => {});
+}
 
 const rawBotContractAddr = (
   process.env.BOT_CONTRACT_ADDRESS || '0x1CA5f9cACbee5533E03FD643E2d4BC89af667c6c'
@@ -224,6 +256,14 @@ const getUserReserveDataAbi = parseAbiItem(
   'function getUserReserveData(address asset, address user) view returns (uint256 currentATokenBalance, uint256 currentStableDebt, uint256 currentVariableDebt, uint256 principalStableDebt, uint256 scaledVariableDebt, uint256 stableBorrowRate, uint256 liquidityRate, uint40 stableRateLastUpdated, bool usageAsCollateralEnabled)'
 );
 const getAssetsPricesAbi = parseAbiItem('function getAssetsPrices(address[] assets) view returns (uint256[])');
+const getSourceOfAssetAbi = parseAbiItem('function getSourceOfAsset(address asset) view returns (address)');
+const aggregatorAbi = parseAbiItem('function aggregator() view returns (address)');
+const answerUpdatedEventAbi = parseAbiItem(
+  'event AnswerUpdated(int256 indexed current, uint256 indexed roundId, uint256 updatedAt)'
+);
+const quoteExactInputSingleAbi = parseAbiItem(
+  'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)'
+);
 const getUserEModeAbi = parseAbiItem('function getUserEMode(address user) view returns (uint256)');
 const borrowEventAbi = parseAbiItem(
   'event Borrow(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount, uint8 interestRateMode, uint256 borrowRate, uint16 indexed referralCode)'
@@ -336,8 +376,52 @@ async function syncDynamicReservesFromProtocol() {
 
     if (discovered.length >= 10) {
       AAVE_RESERVE_ASSETS = discovered;
+
+      // Aktif rezervlerin Chainlink Aggregator adreslerini dinamik olarak keşfet
+      try {
+        const sourceContracts = discovered.map(d => ({
+          address: AAVE_ORACLE_ADDRESS,
+          abi: [getSourceOfAssetAbi] as const,
+          functionName: 'getSourceOfAsset' as const,
+          args: [d.address] as const
+        }));
+        const sourceRes = await publicClient.multicall({
+          contracts: sourceContracts,
+          allowFailure: true
+        });
+        const sources: `0x${string}`[] = [];
+        for (const r of sourceRes) {
+          if (r.status === 'success' && r.result && isAddress(r.result as string)) {
+            sources.push(getAddress(r.result as string));
+          }
+        }
+        if (sources.length > 0) {
+          const aggContracts = sources.map(s => ({
+            address: s,
+            abi: [aggregatorAbi] as const,
+            functionName: 'aggregator' as const
+          }));
+          const aggRes = await publicClient.multicall({
+            contracts: aggContracts,
+            allowFailure: true
+          });
+          const aggSet = new Set<`0x${string}`>(chainlinkAggregators);
+          for (let k = 0; k < sources.length; k++) {
+            const ar = aggRes[k];
+            if (ar?.status === 'success' && ar.result && isAddress(ar.result as string)) {
+              aggSet.add(getAddress(ar.result as string));
+            } else {
+              aggSet.add(sources[k]);
+            }
+          }
+          chainlinkAggregators = Array.from(aggSet);
+        }
+      } catch {
+        // Varsayılan Chainlink aggregator listesiyle devam et
+      }
+
       logInfo(
-        `Synchronized ${discovered.length} active Aave V3 reserves and ${eModeCategories.size} eMode categories dynamically (${discovered.map(d => d.name).join(', ')}).`
+        `Synchronized ${discovered.length} active Aave V3 reserves, ${eModeCategories.size} eMode categories, and ${chainlinkAggregators.length} Chainlink price feeds dynamically (${discovered.map(d => d.name).join(', ')}).`
       );
     }
   } catch (err: any) {
@@ -370,8 +454,11 @@ interface LiquidationCandidate {
   debtUSD: number;
   collateralAsset: `0x${string}`;
   collateralName: string;
+  collateralDecimals: number;
+  collateralPriceUSD: number;
   collateralUSD: number;
   liquidationBonusRatio: number;
+  bestPoolFee: number;
 }
 
 const targetStrikeCache = new Map<
@@ -513,7 +600,7 @@ async function getLiquidationCandidates(
     }
 
     const userDebts: { asset: ReserveAsset; amount: bigint; priceUSD: number; usd: number }[] = [];
-    const userCollaterals: { asset: ReserveAsset; usd: number }[] = [];
+    const userCollaterals: { asset: ReserveAsset; priceUSD: number; usd: number }[] = [];
 
     for (let i = 0; i < reservesSnapshot.length; i++) {
       const asset = reservesSnapshot[i];
@@ -560,7 +647,7 @@ async function getLiquidationCandidates(
           const colTokenAmount = Number(formatUnits(currentATokenBalance, asset.decimals));
           const colValueUSD = colTokenAmount * priceUSD;
           if (colValueUSD >= MIN_STRIKE_DEBT_USD) {
-            userCollaterals.push({ asset, usd: colValueUSD });
+            userCollaterals.push({ asset, priceUSD, usd: colValueUSD });
           }
         }
       }
@@ -597,8 +684,11 @@ async function getLiquidationCandidates(
             debtUSD: d.usd,
             collateralAsset: c.asset.address,
             collateralName: c.asset.name,
+            collateralDecimals: c.asset.decimals,
+            collateralPriceUSD: c.priceUSD,
             collateralUSD: c.usd,
-            liquidationBonusRatio: effectiveBonusRatio
+            liquidationBonusRatio: effectiveBonusRatio,
+            bestPoolFee: 500
           });
         }
       }
@@ -615,6 +705,60 @@ async function getLiquidationCandidates(
 
     const topCandidates = candidates.slice(0, 3);
     if (topCandidates.length > 0) {
+      // Uniswap V3 QuoterV2 (Sıfır Gas, Multicall): Her aday çift için [100, 500, 3000, 10000] havuzlarını önceden sorgula
+      // ve en yüksek net çıktıyı veren havuz komisyonunu (bestPoolFee) vuruş önbelleğine kaydet
+      const feeTiers = [100, 500, 3000, 10000] as const;
+      const quoteContracts = topCandidates.flatMap(cand => {
+        const estCoverUSD = Math.min(cand.debtUSD, cand.collateralUSD / cand.liquidationBonusRatio);
+        const estColTokens =
+          cand.collateralPriceUSD > 0
+            ? (estCoverUSD * cand.liquidationBonusRatio) / cand.collateralPriceUSD
+            : 0;
+        const estColAmountRaw =
+          BigInt(
+            Math.max(1, Math.floor(estColTokens * Math.pow(10, Math.min(cand.collateralDecimals, 8))))
+          ) * (cand.collateralDecimals > 8 ? 10n ** BigInt(cand.collateralDecimals - 8) : 1n);
+
+        return feeTiers.map(fee => ({
+          address: UNISWAP_QUOTER_V2_ADDRESS,
+          abi: [quoteExactInputSingleAbi] as const,
+          functionName: 'quoteExactInputSingle' as const,
+          args: [
+            {
+              tokenIn: cand.collateralAsset,
+              tokenOut: cand.debtAsset,
+              amountIn: estColAmountRaw,
+              fee,
+              sqrtPriceLimitX96: 0n
+            }
+          ] as const
+        }));
+      });
+
+      try {
+        const quoteResults = await getNextReadClient().multicall({
+          contracts: quoteContracts,
+          allowFailure: true
+        });
+        for (let cIdx = 0; cIdx < topCandidates.length; cIdx++) {
+          let bestOut = 0n;
+          let bestFee = 500;
+          for (let fIdx = 0; fIdx < feeTiers.length; fIdx++) {
+            const qRes = quoteResults[cIdx * feeTiers.length + fIdx];
+            if (qRes?.status === 'success' && Array.isArray(qRes.result)) {
+              const amountOut = qRes.result[0] as bigint;
+              if (amountOut > bestOut) {
+                bestOut = amountOut;
+                bestFee = feeTiers[fIdx];
+              }
+            }
+          }
+          topCandidates[cIdx].bestPoolFee = bestFee;
+        }
+      } catch {
+        // Quoter sorgusu başarısız olursa varsayılan 500 (ve sözleşme içi otomatik havuz yedeği) kullanılır
+      }
+
       targetStrikeCache.set(userAddress, { candidates: topCandidates, updatedAt: Date.now() });
     }
     return topCandidates;
@@ -735,7 +879,7 @@ async function executeLiquidationStrike(
 
   if (plans.length === 0) return;
 
-  // PARALEL ÖN SİMÜLASYON (Özel Sniper API [Alchemy] üzerinden ~15ms gecikmeyle çalıştırılır)
+  // PARALEL ÖN SİMÜLASYON (Özel Sniper API [Alchemy] + QuoterV2 En İyi Havuz Seçimi ile ~15ms gecikmeyle çalıştırılır)
   const simResults = await Promise.allSettled(
     plans.map(plan =>
       sniperClient.simulateContract({
@@ -747,7 +891,7 @@ async function executeLiquidationStrike(
           plan.target.collateralAsset,
           userAddress,
           plan.amount,
-          500,
+          plan.target.bestPoolFee || 500,
           plan.minProfitRaw
         ],
         account
@@ -761,7 +905,12 @@ async function executeLiquidationStrike(
 
     if (sim.status === 'fulfilled') {
       logAlert(
-        `SIMULATION PASSED [${plan.label}]! BROADCASTING TO SEQUENCER (${plan.target.collateralName} -> ${plan.target.debtName} | Cover: ~$${plan.usd.toFixed(2)} | Est. Net: +$${plan.expectedNetBonusUSD.toFixed(2)})...`
+        `SIMULATION PASSED [${plan.label} | Fee: ${plan.target.bestPoolFee || 500}]! BROADCASTING TO SEQUENCER (${plan.target.collateralName} -> ${plan.target.debtName} | Cover: ~$${plan.usd.toFixed(2)} | Est. Net: +$${plan.expectedNetBonusUSD.toFixed(2)})...`
+      );
+      sendTelegramAlert(
+        `sim_pass_${userAddress}`,
+        `🎯 <b>TASFİYE SİMÜLASYONU GEÇTİ [${plan.label}]</b>\nHedef: <code>${userAddress}</code>\nÇift: <b>${plan.target.collateralName} → ${plan.target.debtName}</b> (Havuz: ${plan.target.bestPoolFee || 500})\nKapatılan Borç: <b>~$${plan.usd.toFixed(2)}</b>\nTahmini Net Kâr: <b>+$${plan.expectedNetBonusUSD.toFixed(2)}</b>`,
+        10000
       );
 
       try {
@@ -795,6 +944,11 @@ async function executeLiquidationStrike(
         if (receipt.status === 'success') {
           logAlert(
             `STRIKE EXECUTED SUCCESSFULLY! Confirmed in Block ${receipt.blockNumber} | TxHash: ${txHash}`
+          );
+          sendTelegramAlert(
+            `strike_ok_${txHash}`,
+            `💰 <b>TASFİYE BAŞARIYLA GERÇEKLEŞTİ!</b>\nBlok: <code>${receipt.blockNumber}</code>\nÇift: <b>${plan.target.collateralName} → ${plan.target.debtName}</b>\nTahmini Net Kâr: <b>+$${plan.expectedNetBonusUSD.toFixed(2)}</b>\nTx: https://arbiscan.io/tx/${txHash}`,
+            0
           );
           cooldowns.set(userAddress, Date.now() + 60000);
         } else {
@@ -854,6 +1008,11 @@ async function processUserAccountData(
         imminentTargets.add(userAddress);
         logAlert(
           `IMMINENT LIQUIDATION TARGET (Private Sniper API + WSS Block Lock) | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`
+        );
+        sendTelegramAlert(
+          `imminent_${userAddress}`,
+          `⚠️ <b>KRİTİK TASFİYE SINIRI (HF &lt; 1.012)</b>\nHedef: <code>${userAddress}</code>\nSağlık Faktörü (HF): <b>${healthFactor.toFixed(4)}</b>\nToplam Borç: <b>$${totalDebtUSD.toFixed(2)}</b>\nDurum: Özel Sniper API + Chainlink/WSS Blok Kilidine Alındı.`,
+          300000
         );
       }
     } else {
@@ -1176,10 +1335,15 @@ async function main() {
   pollLiveEventsLoop();
 
   logInfo(
-    `Starting Hybrid Multi-RPC & Private Sniper loops (WSS Block Trigger + 250ms / 2.5s / 15s). Monitoring ${activeUsers.size} addresses across ${AAVE_RESERVE_ASSETS.length} reserves.`
+    `Starting Hybrid Multi-RPC & Private Sniper loops (WSS Block + Chainlink Oracle Trigger + QuoterV2 + 250ms / 2.5s / 15s). Monitoring ${activeUsers.size} addresses across ${AAVE_RESERVE_ASSETS.length} reserves.`
+  );
+  sendTelegramAlert(
+    'bot_startup',
+    `🚀 <b>TASFİYE BOTU (v2 HİBRİT + QUOTERV2 + CHAINLINK) AKTİF</b>\nİzlenen Borçlu: <b>${activeUsers.size}</b>\nAktif Rezerv: <b>${AAVE_RESERVE_ASSETS.length}</b>\nChainlink Fiyat Beslemesi: <b>${chainlinkAggregators.length}</b>\nSözleşme: <code>${OUR_BOT_CONTRACT_ADDRESS}</code>`,
+    0
   );
 
-  // Canlı WebSocket (WSS) Blok Tetikleyicisi: Yeni blok üretildiği milisaniyede HF < 1.012 olan hedefleri Özel Sniper API ile anında tarar
+  // Canlı WebSocket (WSS) Blok + Chainlink Oracle Fiyat Tetikleyicisi
   if (!process.env.LOCAL_FORK_URL) {
     try {
       const wsClient = createPublicClient({
@@ -1199,7 +1363,43 @@ async function main() {
           logThrottledWarn('wss_block', `WSS block watcher warning: ${err.message}`);
         }
       });
-      logInfo(`WebSocket Real-Time Block Trigger active on ${arbitrumWssUrl}`);
+
+      // Chainlink AnswerUpdated Olay Tetikleyicisi: Fiyat değiştiği milisaniyede zamanlayıcıyı beklemeden tüm kritik hedefleri tarar
+      if (chainlinkAggregators.length > 0) {
+        let lastOracleSweep = 0;
+        wsClient.watchEvent({
+          address: chainlinkAggregators,
+          event: answerUpdatedEventAbi,
+          poll: false,
+          onLogs: logs => {
+            if (logs.length === 0) return;
+            lastValidOraclePrices = null; // Eski fiyat önbelleğini sıfırla
+            const now = Date.now();
+            if (now - lastOracleSweep < 100) return;
+            lastOracleSweep = now;
+
+            if (imminentTargets.size > 0) {
+              checkUsersBatch(Array.from(imminentTargets), true, true).catch(() => {});
+            }
+            if (ultraCriticalTargets.size > 0) {
+              const nonImminent = Array.from(ultraCriticalTargets).filter(
+                u => !imminentTargets.has(u)
+              );
+              if (nonImminent.length > 0) {
+                checkUsersBatch(nonImminent, true, false).catch(() => {});
+              }
+            }
+          },
+          onError: err => {
+            logThrottledWarn('wss_chainlink', `WSS Chainlink watcher warning: ${err.message}`);
+          }
+        });
+        logInfo(
+          `WebSocket Real-Time Block & Chainlink Oracle Trigger (${chainlinkAggregators.length} feeds) active on ${arbitrumWssUrl}`
+        );
+      } else {
+        logInfo(`WebSocket Real-Time Block Trigger active on ${arbitrumWssUrl}`);
+      }
     } catch (err: any) {
       logThrottledWarn('wss_init', `Could not initialize WSS block trigger: ${err.message}`);
     }
