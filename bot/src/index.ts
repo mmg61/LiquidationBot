@@ -120,20 +120,36 @@ const broadcastWalletClients = process.env.LOCAL_FORK_URL
       })
     ];
 
-// VURUŞ ANINDA 0ms GECİKME İÇİN ÖN-BELLEKLİ NONCE VE GAS PARAMETRELERİ:
+// VURUŞ ANINDA 0ms GECİKME İÇİN ÖN-BELLEKLİ NONCE, GAS VE BAKİYE PARAMETRELERİ:
 let cachedGasPriceWei = 20000000n; // Varsayılan 0.02 Gwei
 let cachedGasPriceGwei = 0.02;
 let cachedNonce: number | undefined = undefined;
+let cachedHotWalletEth = 0;
+let lastBalanceCheckMs = 0;
 
 async function refreshExecutionParams() {
   try {
-    const [gp, nonce] = await Promise.all([
+    const now = Date.now();
+    const shouldCheckBalance = now - lastBalanceCheckMs >= 60000 || lastBalanceCheckMs === 0;
+    const [gp, nonce, bal] = await Promise.all([
       publicClient.getGasPrice(),
-      publicClient.getTransactionCount({ address: account.address, blockTag: 'pending' })
+      publicClient.getTransactionCount({ address: account.address, blockTag: 'pending' }),
+      shouldCheckBalance ? publicClient.getBalance({ address: account.address }) : Promise.resolve(null)
     ]);
     cachedGasPriceWei = gp;
     cachedGasPriceGwei = Number(gp) / 1e9;
     cachedNonce = nonce;
+    if (bal !== null) {
+      lastBalanceCheckMs = now;
+      cachedHotWalletEth = Number(formatUnits(bal, 18));
+      if (cachedHotWalletEth > 0 && cachedHotWalletEth < 0.0005) {
+        sendTelegramAlert(
+          'low_gas_balance',
+          `<b>[KRİTİK SİSTEM UYARISI — DÜŞÜK GAS BAKİYESİ]</b>\n────────────────────────\n<b>Durum:</b> Sıcak işlem cüzdanındaki ETH bakiyesi kritik sınırın altına düştü.\n<b>Cüzdan:</b> <code>${account.address}</code>\n<b>Mevcut Bakiye:</b> ${cachedHotWalletEth.toFixed(6)} ETH\n<b>Önerilen İşlem:</b> Tasfiye işlemlerinin kesintiye uğramaması için Arbitrum ağı üzerinden en az 0.002 ETH aktarınız.`,
+          6 * 60 * 60 * 1000
+        );
+      }
+    }
   } catch (err: any) {
     logThrottledWarn('exec_params', `Failed to refresh nonce/gas parameters: ${err.shortMessage || err.message}`);
   }
@@ -159,6 +175,7 @@ const telegramBotToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const telegramChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
 const telegramThrottleMap = new Map<string, number>();
 
+// Yalnızca gerçekleşen tasfiye işlemlerinde ve kritik sistem arızalarında kurumsal bildirim gönderir
 function sendTelegramAlert(key: string, message: string, minIntervalMs = 0) {
   if (!telegramBotToken || !telegramChatId) return;
   const now = Date.now();
@@ -173,6 +190,7 @@ function sendTelegramAlert(key: string, message: string, minIntervalMs = 0) {
     body: JSON.stringify({
       chat_id: telegramChatId,
       text: message,
+      parse_mode: 'HTML',
       disable_web_page_preview: true
     }),
     signal: AbortSignal.timeout(5000)
@@ -465,6 +483,30 @@ const targetStrikeCache = new Map<
   `0x${string}`,
   { candidates: LiquidationCandidate[]; updatedAt: number }
 >();
+
+// TELEGRAM KONTROL PANELİ İÇİN CANLI BELLEK VERİLERİ (Sıfır Ek RPC Maliyeti)
+const botStartTimeMs = Date.now();
+let latestObservedBlock = 0n;
+let cachedProfitRecipient = '0xF4cd5A9e10b3FC3892c22066697aAC882B5B91EF';
+const sessionStats = {
+  simulationsRun: 0,
+  strikesSucceeded: 0,
+  totalNetProfitUSD: 0
+};
+const borrowerSnapshots = new Map<
+  `0x${string}`,
+  { hf: number; collateralUSD: number; debtUSD: number; updatedAt: number }
+>();
+interface ObservedLiquidation {
+  blockNumber: bigint;
+  txHash: string;
+  user: `0x${string}`;
+  liquidator: string;
+  inRadar: boolean;
+  isOurBot: boolean;
+  timestampMs: number;
+}
+const recentNetworkLiquidations: ObservedLiquidation[] = [];
 
 function logInfo(message: string) {
   console.log(`[INFO] ${new Date().toISOString().split('T')[1].slice(0, -1)} - ${message}`);
@@ -879,6 +921,8 @@ async function executeLiquidationStrike(
 
   if (plans.length === 0) return;
 
+  sessionStats.simulationsRun += plans.length;
+
   // PARALEL ÖN SİMÜLASYON (Özel Sniper API [Alchemy] + QuoterV2 En İyi Havuz Seçimi ile ~15ms gecikmeyle çalıştırılır)
   const simResults = await Promise.allSettled(
     plans.map(plan =>
@@ -906,11 +950,6 @@ async function executeLiquidationStrike(
     if (sim.status === 'fulfilled') {
       logAlert(
         `SIMULATION PASSED [${plan.label} | Fee: ${plan.target.bestPoolFee || 500}]! BROADCASTING TO SEQUENCER (${plan.target.collateralName} -> ${plan.target.debtName} | Cover: ~$${plan.usd.toFixed(2)} | Est. Net: +$${plan.expectedNetBonusUSD.toFixed(2)})...`
-      );
-      sendTelegramAlert(
-        `sim_pass_${userAddress}`,
-        `🎯 <b>TASFİYE SİMÜLASYONU GEÇTİ [${plan.label}]</b>\nHedef: <code>${userAddress}</code>\nÇift: <b>${plan.target.collateralName} → ${plan.target.debtName}</b> (Havuz: ${plan.target.bestPoolFee || 500})\nKapatılan Borç: <b>~$${plan.usd.toFixed(2)}</b>\nTahmini Net Kâr: <b>+$${plan.expectedNetBonusUSD.toFixed(2)}</b>`,
-        10000
       );
 
       try {
@@ -942,17 +981,24 @@ async function executeLiquidationStrike(
         });
 
         if (receipt.status === 'success') {
+          sessionStats.strikesSucceeded += 1;
+          sessionStats.totalNetProfitUSD += plan.expectedNetBonusUSD;
           logAlert(
             `STRIKE EXECUTED SUCCESSFULLY! Confirmed in Block ${receipt.blockNumber} | TxHash: ${txHash}`
           );
           sendTelegramAlert(
             `strike_ok_${txHash}`,
-            `💰 <b>TASFİYE BAŞARIYLA GERÇEKLEŞTİ!</b>\nBlok: <code>${receipt.blockNumber}</code>\nÇift: <b>${plan.target.collateralName} → ${plan.target.debtName}</b>\nTahmini Net Kâr: <b>+$${plan.expectedNetBonusUSD.toFixed(2)}</b>\nTx: https://arbiscan.io/tx/${txHash}`,
+            `<b>[TASFİYE İŞLEMİ ONAYLANDI]</b>\n────────────────────────\n<b>Blok Numarası:</b> <code>${receipt.blockNumber}</code>\n<b>Borçlu Adresi:</b> <code>${userAddress}</code>\n<b>Varlık Çifti:</b> ${plan.target.collateralName} -&gt; ${plan.target.debtName} (Havuz: ${plan.target.bestPoolFee || 500})\n<b>Kapatılan Borç:</b> $${plan.usd.toFixed(2)}\n<b>Tahmini Net Kâr:</b> +$${plan.expectedNetBonusUSD.toFixed(2)}\n<b>Kâr Kasası:</b> <code>${cachedProfitRecipient}</code>\n<b>İşlem Kaydı:</b> https://arbiscan.io/tx/${txHash}`,
             0
           );
           cooldowns.set(userAddress, Date.now() + 60000);
         } else {
           logInfo(`Transaction reverted on-chain in Block ${receipt.blockNumber} | TxHash: ${txHash}`);
+          sendTelegramAlert(
+            `tx_revert_${txHash}`,
+            `<b>[KRİTİK SİSTEM UYARISI — İŞLEM REDDEDİLDİ]</b>\n────────────────────────\n<b>Durum:</b> Yayınlanan tasfiye işlemi zincir üstünde reddedildi (Reverted).\n<b>Blok Numarası:</b> <code>${receipt.blockNumber}</code>\n<b>Hedef Adres:</b> <code>${userAddress}</code>\n<b>Varlık Çifti:</b> ${plan.target.collateralName} -&gt; ${plan.target.debtName}\n<b>İşlem Kaydı:</b> https://arbiscan.io/tx/${txHash}`,
+            0
+          );
         }
 
         refreshExecutionParams();
@@ -982,8 +1028,20 @@ async function processUserAccountData(
   if (cooldowns.has(userAddress) && now < cooldowns.get(userAddress)!) return;
   if (inFlightUsers.has(userAddress)) return;
 
-  const healthFactor = Number(data[5]) / 1e18;
+  const totalCollateralUSD = Number(data[0]) / 1e8;
   const totalDebtUSD = Number(data[1]) / 1e8;
+  const healthFactor = Number(data[5]) / 1e18;
+
+  if (healthFactor > 0 && healthFactor <= 1.25 && totalDebtUSD >= MIN_DEBT_USD) {
+    borrowerSnapshots.set(userAddress, {
+      hf: healthFactor,
+      collateralUSD: totalCollateralUSD,
+      debtUSD: totalDebtUSD,
+      updatedAt: now
+    });
+  } else {
+    borrowerSnapshots.delete(userAddress);
+  }
 
   if (healthFactor > 0 && healthFactor < 1.0) {
     if (totalDebtUSD < MIN_DEBT_USD) {
@@ -1008,11 +1066,6 @@ async function processUserAccountData(
         imminentTargets.add(userAddress);
         logAlert(
           `IMMINENT LIQUIDATION TARGET (Private Sniper API + WSS Block Lock) | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`
-        );
-        sendTelegramAlert(
-          `imminent_${userAddress}`,
-          `⚠️ <b>KRİTİK TASFİYE SINIRI (HF &lt; 1.012)</b>\nHedef: <code>${userAddress}</code>\nSağlık Faktörü (HF): <b>${healthFactor.toFixed(4)}</b>\nToplam Borç: <b>$${totalDebtUSD.toFixed(2)}</b>\nDurum: Özel Sniper API + Chainlink/WSS Blok Kilidine Alındı.`,
-          300000
         );
       }
     } else {
@@ -1199,6 +1252,272 @@ async function getBlockNumberWithRetry(): Promise<bigint> {
   }
 }
 
+// ============================================================================
+// 9. TELEGRAM ETKİLEŞİMLİ KONTROL PANELİ (TARAYICI PANELİ KARŞILIĞI - SIFIR SPAM)
+// ============================================================================
+type PanelTab = 'overview' | 'borrowers' | 'liquidations' | 'wallet';
+
+function formatUptime(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  if (days > 0) return `${days} gün ${hours} saat ${mins} dk`;
+  if (hours > 0) return `${hours} saat ${mins} dk`;
+  return `${mins} dakika`;
+}
+
+function buildTelegramPanelView(tab: PanelTab): { text: string; reply_markup: any } {
+  const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  let body = '';
+
+  if (tab === 'overview') {
+    body =
+      `<b>[ARBITRUM AAVE V3 TASFİYE BOTU — YÖNETİM PANELİ]</b>\n` +
+      `<b>Görünüm:</b> Genel Sistem Durumu\n` +
+      `────────────────────────\n` +
+      `<b>Sistem Durumu:</b> ÇEVRİMİÇİ (Hibrit Keskin Nişancı)\n` +
+      `<b>Çalışma Süresi:</b> ${formatUptime(Date.now() - botStartTimeMs)}\n` +
+      `<b>Son İşlenen Blok:</b> <code>${latestObservedBlock.toString()}</code>\n` +
+      `<b>Ağ Gas Ücreti:</b> ${cachedGasPriceGwei.toFixed(3)} Gwei\n` +
+      `<b>Güncel WETH Fiyatı:</b> $${cachedEthPriceUSD.toFixed(2)}\n` +
+      `────────────────────────\n` +
+      `<b>İzlenen Toplam Borçlu:</b> ${activeUsers.size}\n` +
+      `<b>Anlık Vuruş Kilidi (HF &lt; 1.012):</b> ${imminentTargets.size} cüzdan\n` +
+      `<b>Ultra-Kritik Radar (HF &lt; 1.045):</b> ${ultraCriticalTargets.size} cüzdan\n` +
+      `<b>Kritik Radar (HF &lt;= 1.120):</b> ${criticalTargets.size} cüzdan\n` +
+      `<b>Aktif Rezerv / Chainlink:</b> ${AAVE_RESERVE_ASSETS.length} varlık / ${chainlinkAggregators.length} besleme\n` +
+      `────────────────────────\n` +
+      `<b>Oturum Simülasyon Sayısı:</b> ${sessionStats.simulationsRun}\n` +
+      `<b>Başarılı Tasfiye İşlemi:</b> ${sessionStats.strikesSucceeded}\n` +
+      `<b>Oturum Tahmini Net Kâr:</b> $${sessionStats.totalNetProfitUSD.toFixed(2)}\n` +
+      `────────────────────────\n` +
+      `<b>Son Güncelleme:</b> ${nowStr}`;
+  } else if (tab === 'borrowers') {
+    const sorted = Array.from(borrowerSnapshots.entries())
+      .map(([address, info]) => ({ address, ...info }))
+      .sort((a, b) => a.hf - b.hf)
+      .slice(0, 10);
+
+    let listText = '';
+    if (sorted.length === 0) {
+      listText = `Şu anda Sağlık Faktörü 1.25 altında olan borçlu cüzdan bulunmamaktadır.\n`;
+    } else {
+      sorted.forEach((item, idx) => {
+        const shortAddr = `${item.address.slice(0, 6)}...${item.address.slice(-4)}`;
+        const cachedCand = targetStrikeCache.get(item.address)?.candidates?.[0];
+        const pairStr = cachedCand
+          ? `${cachedCand.collateralName}-&gt;${cachedCand.debtName}`
+          : 'Hesaplanıyor';
+        listText +=
+          `<b>${idx + 1}.</b> <code>${shortAddr}</code> | <b>HF: ${item.hf.toFixed(4)}</b>\n` +
+          `   Teminat: $${item.collateralUSD.toFixed(0)} | Borç: $${item.debtUSD.toFixed(0)} | Çift: ${pairStr}\n`;
+      });
+    }
+
+    body =
+      `<b>[ARBITRUM AAVE V3 TASFİYE BOTU — YÖNETİM PANELİ]</b>\n` +
+      `<b>Görünüm:</b> Yüksek Riskli Borçlular (İlk 10)\n` +
+      `────────────────────────\n` +
+      listText +
+      `────────────────────────\n` +
+      `<b>Toplam Riskli Aday (HF &lt;= 1.25):</b> ${borrowerSnapshots.size} cüzdan\n` +
+      `<b>Son Güncelleme:</b> ${nowStr}`;
+  } else if (tab === 'liquidations') {
+    let listText = '';
+    if (recentNetworkLiquidations.length === 0) {
+      listText = `Bot başlatıldığından bu yana ağ üzerinde yeni bir tasfiye işlemi gözlemlenmedi.\n`;
+    } else {
+      recentNetworkLiquidations.slice(0, 10).forEach((liq, idx) => {
+        const shortUser = `${liq.user.slice(0, 6)}...${liq.user.slice(-4)}`;
+        const executorLabel = liq.isOurBot ? 'BİZİM BOT' : 'RAKİP BOT';
+        const radarLabel = liq.inRadar ? 'Radarda' : 'Radar Dışı';
+        const timeStr = new Date(liq.timestampMs).toISOString().split('T')[1].slice(0, 8);
+        listText +=
+          `<b>${idx + 1}. Blok ${liq.blockNumber.toString()}</b> (${timeStr} UTC)\n` +
+          `   Borçlu: <code>${shortUser}</code> | Yürüten: <b>${executorLabel}</b> (${radarLabel})\n`;
+      });
+    }
+
+    body =
+      `<b>[ARBITRUM AAVE V3 TASFİYE BOTU — YÖNETİM PANELİ]</b>\n` +
+      `<b>Görünüm:</b> Ağdaki Son Tasfiye İşlemleri\n` +
+      `────────────────────────\n` +
+      listText +
+      `────────────────────────\n` +
+      `<b>Son Güncelleme:</b> ${nowStr}`;
+  } else {
+    const ethUsdValue = cachedHotWalletEth * cachedEthPriceUSD;
+    const gasStatus =
+      cachedHotWalletEth >= 0.001
+        ? 'YETERLİ (Normal)'
+        : cachedHotWalletEth > 0
+          ? 'KRİTİK (Bakiye Ekleyiniz)'
+          : 'Okunuyor...';
+
+    body =
+      `<b>[ARBITRUM AAVE V3 TASFİYE BOTU — YÖNETİM PANELİ]</b>\n` +
+      `<b>Görünüm:</b> Cüzdan, Kasa ve Sözleşme Bilgileri\n` +
+      `────────────────────────\n` +
+      `<b>Sıcak İşlem Cüzdanı (Executor):</b>\n` +
+      `<code>${account.address}</code>\n` +
+      `<b>Canlı Gas Bakiyesi:</b> ${cachedHotWalletEth.toFixed(5)} ETH (~$${ethUsdValue.toFixed(2)})\n` +
+      `<b>Gas Bakiye Durumu:</b> ${gasStatus}\n` +
+      `<b>Sıradaki Nonce:</b> ${cachedNonce !== undefined ? cachedNonce : 'Senkronize ediliyor'}\n` +
+      `────────────────────────\n` +
+      `<b>Soğuk Kâr Kasası (Profit Recipient):</b>\n` +
+      `<code>${cachedProfitRecipient}</code>\n` +
+      `<b>Kasa Güvenlik Modu:</b> Ayrıştırılmış Soğuk Cüzdan (Aktif)\n` +
+      `────────────────────────\n` +
+      `<b>Aktif Tasfiye Sözleşmesi (v2):</b>\n` +
+      `<code>${OUR_BOT_CONTRACT_ADDRESS}</code>\n` +
+      `────────────────────────\n` +
+      `<b>Son Güncelleme:</b> ${nowStr}`;
+  }
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        {
+          text: tab === 'overview' ? '[ Genel Durum ]' : 'Genel Durum',
+          callback_data: 'panel_overview'
+        },
+        {
+          text: tab === 'borrowers' ? '[ Riskli Borçlular ]' : 'Riskli Borçlular',
+          callback_data: 'panel_borrowers'
+        }
+      ],
+      [
+        {
+          text: tab === 'liquidations' ? '[ Son Tasfiyeler ]' : 'Son Tasfiyeler',
+          callback_data: 'panel_liquidations'
+        },
+        {
+          text: tab === 'wallet' ? '[ Cüzdan ve Kasa ]' : 'Cüzdan ve Kasa',
+          callback_data: 'panel_wallet'
+        }
+      ],
+      [
+        {
+          text: 'Verileri Şimdi Yenile',
+          callback_data: `refresh_${tab}`
+        }
+      ]
+    ]
+  };
+
+  return { text: body, reply_markup };
+}
+
+function startTelegramControlPanel() {
+  if (!telegramBotToken) return;
+
+  // Telegram alt menü komutlarını kaydet
+  fetch(`https://api.telegram.org/bot${telegramBotToken}/setMyCommands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      commands: [
+        { command: 'panel', description: 'Yönetim ve izleme panelini aç' },
+        { command: 'durum', description: 'Genel sistem durumu özeti' },
+        { command: 'riskli', description: 'Yüksek riskli borçlular tablosu' },
+        { command: 'tasfiyeler', description: 'Ağdaki son tasfiye işlemleri' },
+        { command: 'cuzdan', description: 'Cüzdan, gas ve soğuk kasa bilgileri' }
+      ]
+    }),
+    signal: AbortSignal.timeout(5000)
+  }).catch(() => {});
+
+  let updateOffset = 0;
+
+  async function pollTelegramUpdates() {
+    try {
+      const res = await fetch(
+        `https://api.telegram.org/bot${telegramBotToken}/getUpdates?offset=${updateOffset}&timeout=20`,
+        { signal: AbortSignal.timeout(25000) }
+      );
+      if (res.ok) {
+        const data = (await res.json()) as any;
+        if (data?.ok && Array.isArray(data.result)) {
+          for (const upd of data.result) {
+            updateOffset = upd.update_id + 1;
+
+            if (upd.message && upd.message.text) {
+              const chatId = String(upd.message.chat?.id || '');
+              if (telegramChatId && chatId !== telegramChatId) continue;
+
+              const cmd = String(upd.message.text).trim().toLowerCase();
+              let initialTab: PanelTab = 'overview';
+              if (cmd.startsWith('/riskli')) initialTab = 'borrowers';
+              else if (cmd.startsWith('/tasfiyeler')) initialTab = 'liquidations';
+              else if (cmd.startsWith('/cuzdan')) initialTab = 'wallet';
+
+              const view = buildTelegramPanelView(initialTab);
+              await fetch(`https://api.telegram.org/bot${telegramBotToken}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: view.text,
+                  parse_mode: 'HTML',
+                  disable_web_page_preview: true,
+                  reply_markup: view.reply_markup
+                }),
+                signal: AbortSignal.timeout(5000)
+              }).catch(() => {});
+            } else if (upd.callback_query) {
+              const cb = upd.callback_query;
+              const chatId = String(cb.message?.chat?.id || '');
+              const messageId = cb.message?.message_id;
+              if (telegramChatId && chatId !== telegramChatId) continue;
+
+              const dataStr = String(cb.data || '');
+              let targetTab: PanelTab = 'overview';
+              if (dataStr.endsWith('borrowers')) targetTab = 'borrowers';
+              else if (dataStr.endsWith('liquidations')) targetTab = 'liquidations';
+              else if (dataStr.endsWith('wallet')) targetTab = 'wallet';
+
+              const view = buildTelegramPanelView(targetTab);
+
+              await Promise.allSettled([
+                fetch(`https://api.telegram.org/bot${telegramBotToken}/editMessageText`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    message_id: messageId,
+                    text: view.text,
+                    parse_mode: 'HTML',
+                    disable_web_page_preview: true,
+                    reply_markup: view.reply_markup
+                  }),
+                  signal: AbortSignal.timeout(5000)
+                }),
+                fetch(`https://api.telegram.org/bot${telegramBotToken}/answerCallbackQuery`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    callback_query_id: cb.id,
+                    text: 'Panel verileri güncellendi.'
+                  }),
+                  signal: AbortSignal.timeout(5000)
+                })
+              ]);
+            }
+          }
+        }
+      }
+    } catch {
+      // Bağlantı zaman aşımında sessizce sonraki tura geç
+    } finally {
+      setTimeout(pollTelegramUpdates, 1500);
+    }
+  }
+
+  pollTelegramUpdates();
+  logInfo('Telegram Interactive Control Panel listener active (Zero-Spam Mode).');
+}
+
 async function main() {
   console.log('==================================================');
   console.log('[SYSTEM] HIGH-FREQUENCY LIQUIDATION SNIPER ENGINE ONLINE');
@@ -1213,6 +1532,7 @@ async function main() {
       abi: botContractAbi,
       functionName: 'profitRecipient'
     })) as `0x${string}`;
+    cachedProfitRecipient = currentRecipient;
     const desiredRecipientRaw = (process.env.PROFIT_RECIPIENT_ADDRESS || '').trim().toLowerCase();
     if (desiredRecipientRaw && isAddress(desiredRecipientRaw)) {
       const desiredRecipient = getAddress(desiredRecipientRaw);
@@ -1228,6 +1548,7 @@ async function main() {
         });
         await publicClient.waitForTransactionReceipt({ hash: txHash });
         await refreshExecutionParams();
+        cachedProfitRecipient = desiredRecipient;
         logInfo(`Updated on-chain profitRecipient to ${desiredRecipient} (Tx: ${txHash})`);
       } else {
         logInfo(`Verified Contract Security | Hot Executor: ${account.address} | Cold Profit Vault: ${currentRecipient}`);
@@ -1240,11 +1561,15 @@ async function main() {
   }
 
   const currentBlock = await getBlockNumberWithRetry();
+  latestObservedBlock = currentBlock;
   logInfo(`Connected to Arbitrum Network. Current Block: ${currentBlock}`);
 
   // Aave V3 üzerindeki tüm aktif rezervleri ve gerçek tasfiye bonuslarını dinamik çek (ve her 30 dakikada bir yenile)
   await syncDynamicReservesFromProtocol();
   setInterval(syncDynamicReservesFromProtocol, 30 * 60 * 1000);
+
+  // Telegram etkileşimli yönetim panelini başlat (Otomatik açılış mesajı göndermez; yalnızca komut geldiğinde veya tasfiye/hata anında yazar)
+  startTelegramControlPanel();
 
   // Arka planda geçmiş bloklardaki borçluları (onBehalfOf) senkronize et
   syncRecentBorrowers(currentBlock);
@@ -1257,6 +1582,7 @@ async function main() {
       for (const client of readClients) {
         try {
           const latestBlock = await client.getBlockNumber();
+          latestObservedBlock = latestBlock;
           if (latestBlock <= lastEventBlock) {
             lastErr = null;
             break;
@@ -1302,10 +1628,27 @@ async function main() {
 
           for (const log of liqLogs) {
             const user = log.args?.user;
-            const liquidator = log.args?.liquidator;
+            const liquidator = log.args?.liquidator || '';
             if (user && isAddress(user)) {
               const checksummed = getAddress(user);
               const inRadar = activeUsers.has(checksummed);
+              const isOurBot =
+                liquidator.toLowerCase() === OUR_BOT_CONTRACT_ADDRESS.toLowerCase() ||
+                liquidator.toLowerCase() === account.address.toLowerCase();
+
+              recentNetworkLiquidations.unshift({
+                blockNumber: log.blockNumber || toBlock,
+                txHash: log.transactionHash || '',
+                user: checksummed,
+                liquidator,
+                inRadar,
+                isOurBot,
+                timestampMs: Date.now()
+              });
+              if (recentNetworkLiquidations.length > 15) {
+                recentNetworkLiquidations.pop();
+              }
+
               logAlert(
                 `ON-CHAIN LIQUIDATION OBSERVED | User: ${checksummed} | In Our Radar: ${inRadar ? 'YES' : 'NO'} | Liquidator: ${liquidator}`
               );
@@ -1323,9 +1666,15 @@ async function main() {
         }
       }
       if (lastErr) {
+        const errMsg = lastErr.shortMessage || lastErr.message || 'Unknown RPC error';
         logThrottledWarn(
           'poll_events',
-          `Event polling failed across all RPCs: ${lastErr.shortMessage || lastErr.message}`
+          `Event polling failed across all RPCs: ${errMsg}`
+        );
+        sendTelegramAlert(
+          'rpc_all_down',
+          `<b>[KRİTİK SİSTEM UYARISI — RPC BAĞLANTI HATASI]</b>\n────────────────────────\n<b>Durum:</b> Tüm yedek RPC sunucularında olay taraması başarısız oldu.\n<b>Hata Detayı:</b> <code>${String(errMsg).slice(0, 160)}</code>\n<b>Sistem Tepkisi:</b> 10 saniye sonra otomatik yeniden denenecek.`,
+          30 * 60 * 1000
         );
       }
     } finally {
@@ -1336,11 +1685,6 @@ async function main() {
 
   logInfo(
     `Starting Hybrid Multi-RPC & Private Sniper loops (WSS Block + Chainlink Oracle Trigger + QuoterV2 + 250ms / 2.5s / 15s). Monitoring ${activeUsers.size} addresses across ${AAVE_RESERVE_ASSETS.length} reserves.`
-  );
-  sendTelegramAlert(
-    'bot_startup',
-    `🚀 <b>TASFİYE BOTU (v2 HİBRİT + QUOTERV2 + CHAINLINK) AKTİF</b>\nİzlenen Borçlu: <b>${activeUsers.size}</b>\nAktif Rezerv: <b>${AAVE_RESERVE_ASSETS.length}</b>\nChainlink Fiyat Beslemesi: <b>${chainlinkAggregators.length}</b>\nSözleşme: <code>${OUR_BOT_CONTRACT_ADDRESS}</code>`,
-    0
   );
 
   // Canlı WebSocket (WSS) Blok + Chainlink Oracle Fiyat Tetikleyicisi (Otomatik Yeniden Abonelik Korumalı)
@@ -1433,4 +1777,11 @@ async function main() {
   generalRadarLoop();
 }
 
-main().catch(err => console.error(`[FATAL ERROR] ${err.message}`));
+main().catch(err => {
+  console.error(`[FATAL ERROR] ${err.message}`);
+  sendTelegramAlert(
+    'fatal_error',
+    `<b>[KRİTİK SİSTEM UYARISI — MOTOR DURDU]</b>\n────────────────────────\n<b>Durum:</b> Ana tasfiye motorunda beklenmeyen bir hata oluştu.\n<b>Hata Detayı:</b> <code>${String(err.message || err).slice(0, 200)}</code>\n<b>Sistem Tepkisi:</b> PM2 tarafından otomatik yeniden başlatılacak.`,
+    60000
+  );
+});
