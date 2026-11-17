@@ -50,12 +50,23 @@ interface IFlashLoanSimpleReceiver {
 }
 
 contract MockAavePool {
+    error MustNotLeaveDust();
+
     uint256 public actualDebtUsedRatioBps = 10000; // 100% by default; can be <10000 to simulate Aave capping debtToCover
     uint256 public collateralRewardAmount;
+    uint256 public totalUserCollateral;
+    uint256 public minLeftOverCollateral;
 
     function setLiquidationBehavior(uint256 _usedRatioBps, uint256 _collateralReward) external {
         actualDebtUsedRatioBps = _usedRatioBps;
         collateralRewardAmount = _collateralReward;
+        totalUserCollateral = 0;
+        minLeftOverCollateral = 0;
+    }
+
+    function setCollateralDustRule(uint256 _totalUserCollateral, uint256 _minLeftOverCollateral) external {
+        totalUserCollateral = _totalUserCollateral;
+        minLeftOverCollateral = _minLeftOverCollateral;
     }
 
     function flashLoanSimple(
@@ -89,8 +100,18 @@ contract MockAavePool {
         bool
     ) external {
         uint256 actualDebtTaken = (debtToCover * actualDebtUsedRatioBps) / 10000;
+        uint256 reward = collateralRewardAmount > 0 ? collateralRewardAmount : (actualDebtTaken * 105) / 100;
+
+        if (totalUserCollateral > 0) {
+            require(reward <= totalUserCollateral, "Not enough collateral");
+            uint256 remainingCol = totalUserCollateral - reward;
+            if (remainingCol > 0 && remainingCol < minLeftOverCollateral) {
+                revert MustNotLeaveDust();
+            }
+        }
+
         MockERC20(debtAsset).transferFrom(msg.sender, address(this), actualDebtTaken);
-        MockERC20(collateralAsset).mint(msg.sender, collateralRewardAmount);
+        MockERC20(collateralAsset).mint(msg.sender, reward);
     }
 }
 
@@ -240,6 +261,56 @@ contract LiquidationBotTest is Test {
         );
 
         assertEq(debtToken.balanceOf(coldProfitWallet), 14_500_000);
+    }
+
+    function test_Success_SameTokenLiquidation_SkipsSwapAndTransfersProfit() public {
+        // Same-token liquidation: debtAsset == collateralAsset == USDT (1,000 USDT covered, 1,050 USDT collateral seized)
+        // SwapRouter is set to revert on all calls to prove executeOperation skips SwapRouter when collateralAsset == debtAsset
+        pool.setLiquidationBehavior(10000, 1_050_000_000);
+        router.setRoutingMode(true, true, 0);
+
+        bot.triggerLiquidation(
+            address(debtToken),
+            address(debtToken),
+            borrower,
+            1_000_000_000,
+            500,
+            10_000_000 // 10 USDT minProfit
+        );
+
+        // Seized = 1,050 USDT, FlashLoan repayment = 1,000.5 USDT -> Net profit = 49.5 USDT sent to coldProfitWallet
+        assertEq(debtToken.balanceOf(coldProfitWallet), 49_500_000);
+    }
+
+    function test_RevertWhen_MustNotLeaveDust_And_SuccessWhen_DustSafeCapped() public {
+        // Models Aave V3.3 MustNotLeaveDust() (0xb629b0e4):
+        // Borrower has $2,894.46 collateral (2,894_460_000) and $4,135.63 debt, 5% liquidation bonus, $1,000 minimum leftover collateral
+        pool.setLiquidationBehavior(10000, 0);
+        pool.setCollateralDustRule(2_894_460_000, 1_000_000_000);
+
+        // 1. Naive 50% debt cover ($2,067.81 -> seizes $2,171.20 -> leaves $723.26 < $1,000 collateral) MUST revert with MustNotLeaveDust()
+        vm.expectRevert(MockAavePool.MustNotLeaveDust.selector);
+        bot.triggerLiquidation(
+            address(debtToken),
+            address(debtToken),
+            borrower,
+            2_067_810_000,
+            500,
+            1_000_000
+        );
+
+        // 2. Dust-safe capped cover: ($2,894.46 - $1,050) / 1.05 = $1,756.62 -> seizes $1,844.45 -> leaves $1,050.01 >= $1,000 collateral -> SUCCEEDS!
+        uint256 dustSafeCover = 1_756_620_000;
+        bot.triggerLiquidation(
+            address(debtToken),
+            address(debtToken),
+            borrower,
+            dustSafeCover,
+            500,
+            10_000_000
+        );
+
+        assertGt(debtToken.balanceOf(coldProfitWallet), 80_000_000);
     }
 
     function test_Fork_RealArbitrum_AaveV3_And_UniswapV3_Liquidation() public {

@@ -28,7 +28,7 @@ const AAVE_DATA_PROVIDER_ADDRESS = '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654' 
 const AAVE_ORACLE_ADDRESS = '0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7' as const;
 
 const OUR_BOT_CONTRACT_ADDRESS = getAddress(
-  (process.env.BOT_CONTRACT_ADDRESS || '0x1CA5f9cACbee5533E03FD643E2d4BC89af667c6c')
+  (process.env.BOT_CONTRACT_ADDRESS || '0x0FC0531A67bA78B324d9482da48e4ce224B29C3e')
     .trim()
     .toLowerCase()
 );
@@ -90,7 +90,13 @@ const KNOWN_RESERVES: { symbol: string; address: `0x${string}`; decimals: number
   { symbol: 'LINK',   address: '0xf97f4df75117a78c1A5a0DBb814Af92458539FB4', decimals: 18 },
   { symbol: 'AAVE',   address: '0xba5DdD1f9d7F570dc94a51479a000E3BCE967196', decimals: 18 },
   { symbol: 'FRAX',   address: '0x17FC002b466eEc40DaE837fc4bE5c67993ddBd6F', decimals: 18 },
-  { symbol: 'LUSD',   address: '0x93b346b6BC2548dA6A1E7d98E9a421B42541425b', decimals: 18 }
+  { symbol: 'LUSD',   address: '0x93b346b6BC2548dA6A1E7d98E9a421B42541425b', decimals: 18 },
+  { symbol: 'EURS',   address: '0xD223b176c9a0de706233a8a3581B045baCA1bE62', decimals: 2 },
+  { symbol: 'MAI',    address: '0x3F56e0c36d275367b8C502090EDF38289b3dEa0d', decimals: 18 },
+  { symbol: 'GHO',    address: '0x7dfF72693f6A4149b17e7C6314655f6A9F7c8B33', decimals: 18 },
+  { symbol: 'ezETH',  address: '0x2416092f143378750bb29b79eD961ab195CcEea5', decimals: 18 },
+  { symbol: 'rsETH',  address: '0x4186BFC76E2E237523CBC30FD220FE055156b41F', decimals: 18 },
+  { symbol: 'tBTC',   address: '0x6c84a8f1c29108F47a79964b5Fe888D4f4D0dE40', decimals: 18 }
 ];
 
 const tokenMetaCache = new Map<string, TokenMeta>();
@@ -98,7 +104,7 @@ for (const r of KNOWN_RESERVES) {
   tokenMetaCache.set(r.address.toLowerCase(), {
     symbol: r.symbol,
     decimals: r.decimals,
-    priceUSD: 1.0,
+    priceUSD: 0,
     isSupportedByBot: true
   });
 }
@@ -249,6 +255,13 @@ function scheduleSaveMonitoredUsers() {
 let cachedHighestBlock = 0n;
 let cachedFullScanDone = false;
 
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const SEVEN_DAYS_BLOCK_SPAN = 2420000;
+
+const KNOWN_SVR_OEV_LIQUIDATORS = new Set<string>([
+  '0x8ad1ae9d97c79aa68a0a151e83ff3942f68f86c1'
+]);
+
 function loadLiquidationCacheFromDisk() {
   ensureDataDir();
   if (!fs.existsSync(LIQ_CACHE_FILE)) return;
@@ -257,9 +270,16 @@ function loadLiquidationCacheFromDisk() {
     const parsed = JSON.parse(raw);
     if (parsed.highestBlock) cachedHighestBlock = BigInt(parsed.highestBlock);
     if (parsed.fullScanDone) cachedFullScanDone = Boolean(parsed.fullScanDone);
+    const now = Date.now();
+    const minBlockKeep =
+      cachedHighestBlock > BigInt(SEVEN_DAYS_BLOCK_SPAN)
+        ? Number(cachedHighestBlock) - SEVEN_DAYS_BLOCK_SPAN
+        : 0;
     if (Array.isArray(parsed.records)) {
       for (const rec of parsed.records) {
         if (rec && rec.txHash) {
+          if (rec.timestampMs && now - Number(rec.timestampMs) > SEVEN_DAYS_MS) continue;
+          if (minBlockKeep > 0 && Number(rec.blockNumber || 0) < minBlockKeep) continue;
           rec.botReasonText = formatBotReason(
             rec.botStatusCode,
             Number(rec.debtUSD || 0),
@@ -285,12 +305,25 @@ function saveLiquidationCacheToDisk(highestBlock?: bigint, fullScanDone?: boolea
     if (fullScanDone !== undefined) {
       cachedFullScanDone = fullScanDone;
     }
+    const now = Date.now();
+    const minBlockKeep =
+      cachedHighestBlock > BigInt(SEVEN_DAYS_BLOCK_SPAN)
+        ? Number(cachedHighestBlock) - SEVEN_DAYS_BLOCK_SPAN
+        : 0;
+    for (const [key, rec] of liquidationsMap.entries()) {
+      if (
+        (rec.timestampMs && now - Number(rec.timestampMs) > SEVEN_DAYS_MS) ||
+        (minBlockKeep > 0 && Number(rec.blockNumber || 0) < minBlockKeep)
+      ) {
+        liquidationsMap.delete(key);
+      }
+    }
     const records = Array.from(liquidationsMap.values()).sort((a, b) => b.blockNumber - a.blockNumber);
     fs.writeFileSync(
       LIQ_CACHE_FILE,
       JSON.stringify(
         {
-          updatedAt: Date.now(),
+          updatedAt: now,
           highestBlock: cachedHighestBlock.toString(),
           fullScanDone: cachedFullScanDone,
           records
@@ -333,7 +366,7 @@ async function refreshKnownPricesAndMeta(extraAddresses: `0x${string}`[] = []) {
           symbol,
           decimals,
           priceUSD: 0,
-          isSupportedByBot: true
+          isSupportedByBot: false
         });
       }
     }
@@ -410,13 +443,16 @@ function formatBotReason(
     return `Kapatılan borç ($${debtUSD.toFixed(2)}) zarar koruma alt sınırı olan $25.00 altında (Gas masrafı kârdan yüksek).`;
   }
   if (botStatusCode === 'SKIPPED_SAME_TOKEN') {
-    return `Borç ve teminat aynı varlık (${debtSymbol}); tekli Uniswap V3 havuzunda aynı token takas edilemez.`;
+    return `Borç ve teminat aynı varlık (${debtSymbol}); eski sürümde takas atlanmıştı (Yeni sürümde aynı-token tasfiye aktif).`;
   }
   if (botStatusCode === 'UNSUPPORTED_TOKEN') {
-    return `${colSymbol} -> ${debtSymbol} çifti botun 11 ana rezerv listesi dışında.`;
+    return `${colSymbol} -> ${debtSymbol} çifti botun 20 aktif Aave V3 rezerv listesi dışında.`;
   }
   if (botStatusCode === 'NOT_IN_RADAR') {
     return 'Cüzdan daha önce yerel izleme listesinde (monitored_users.json) yoktu; şimdi otomatik eklendi.';
+  }
+  if (KNOWN_SVR_OEV_LIQUIDATORS.has(liquidator.toLowerCase())) {
+    return `Cüzdan radarımızdaydı; Chainlink SVR (OEV) özel fiyat ihalesi (${liquidator.slice(0, 8)}...) ile yeni fiyat ve tasfiye tek işlemde atomik yürütüldü.`;
   }
   return `Cüzdan radarımızdaydı; rakip kontrat (${liquidator.slice(0, 8)}...) blok içinde daha düşük gecikmeyle onay aldı.`;
 }
@@ -828,7 +864,8 @@ async function getUserPositionDetails(userAddress: `0x${string}`) {
         boolean
       ];
       const meta = tokenMetaCache.get(reserve.address.toLowerCase());
-      const priceUSD = meta ? meta.priceUSD : 1.0;
+      const priceUSD = meta && meta.priceUSD > 0 ? meta.priceUSD : 0;
+      if (priceUSD <= 0) continue;
 
       if (aTokenBal > 0n) {
         const amt = Number(formatUnits(aTokenBal, reserve.decimals));

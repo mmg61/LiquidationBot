@@ -984,6 +984,8 @@
           statusBadge = `<span class="badge badge-warn">LİSTE DIŞI REZERV</span>`;
         } else if (item.botStatusCode === 'NOT_IN_RADAR') {
           statusBadge = `<span class="badge badge-warn">RADAR DIŞI CÜZDAN</span>`;
+        } else if ((item.liquidator || '').toLowerCase() === '0x8ad1ae9d97c79aa68a0a151e83ff3942f68f86c1') {
+          statusBadge = `<span class="badge badge-warn">CHAINLINK SVR (OEV) İHALESİ</span>`;
         } else {
           statusBadge = `<span class="badge badge-danger">RAKİP BOT ÖNCE VURDU</span>`;
         }
@@ -1179,7 +1181,7 @@
       const addrEl = document.getElementById('modalUserAddress');
       const bodyEl = document.getElementById('modalBodyContent');
       addrEl.textContent = address;
-      bodyEl.innerHTML = `<div class="mono" style="padding:20px; color:var(--text-secondary);">11 Aave V3 rezerv varlığı Multicall3 ile sorgulanıyor...</div>`;
+      bodyEl.innerHTML = `<div class="mono" style="padding:20px; color:var(--text-secondary);">20 Aave V3 rezerv varlığı Multicall3 ile sorgulanıyor...</div>`;
       modal.classList.add('open');
 
       try {

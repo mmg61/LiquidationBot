@@ -8,7 +8,8 @@ import {
   parseAbi,
   isAddress,
   getAddress,
-  formatUnits
+  formatUnits,
+  encodePacked
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { arbitrum, localhost } from 'viem/chains';
@@ -23,11 +24,17 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
 // ============================================================================
 // 1. HİBRİT AĞ, ÇOKLU ÜCRETSİZ RPC HAVUZU VE ÖZEL SNIPER API YAPILANDIRMASI
 // ============================================================================
-const primaryRpcUrl =
-  process.env.LOCAL_FORK_URL || process.env.ARBITRUM_RPC_URL || 'https://arb1.arbitrum.io/rpc';
+const rawPrimaryRpc = (process.env.ARBITRUM_RPC_URL || '').trim();
+// arb1.arbitrum.io/rpc Multicall okumalarında ~3.5s gecikme yarattığı için yalnızca geniş getLogs taramasında kullanılır;
+// hızlı Multicall okumalarında düşük gecikmeli (<200ms) düğümler tercih edilir.
+const fastPrimaryRpcUrl =
+  process.env.LOCAL_FORK_URL ||
+  (rawPrimaryRpc && !rawPrimaryRpc.includes('arb1.arbitrum.io')
+    ? rawPrimaryRpc
+    : 'https://arbitrum-one-rpc.publicnode.com');
 
 // Özel Keskin Nişancı API (Alchemy): Sadece HF < 1.012, simulateContract ve işlem yayını anında kullanılır (Ücretsiz kotayı korur)
-const sniperRpcUrl = process.env.SNIPER_RPC_URL || primaryRpcUrl;
+const sniperRpcUrl = process.env.SNIPER_RPC_URL || fastPrimaryRpcUrl;
 const arbitrumWssUrl = process.env.ARBITRUM_WSS_URL || 'wss://arbitrum-one-rpc.publicnode.com';
 
 const privateKey = process.env.PRIVATE_KEY;
@@ -41,15 +48,16 @@ const account = privateKeyToAccount(
 );
 const chainToUse = process.env.LOCAL_FORK_URL ? localhost : arbitrum;
 
-// Viem fallback transport ile otomatik yedekli genel okuma istemcisi
+// Viem fallback transport ile otomatik yedekli düşük gecikmeli genel okuma istemcisi
 const publicClient = createPublicClient({
   chain: chainToUse,
   transport: process.env.LOCAL_FORK_URL
-    ? http(primaryRpcUrl, { timeout: 10000 })
+    ? http(fastPrimaryRpcUrl, { timeout: 8000 })
     : fallback([
-        http(primaryRpcUrl, { timeout: 10000 }),
-        http('https://arbitrum-one-rpc.publicnode.com', { timeout: 10000 }),
-        http('https://arbitrum.drpc.org', { timeout: 10000 }),
+        http(fastPrimaryRpcUrl, { timeout: 6000 }),
+        http('https://arbitrum-one-rpc.publicnode.com', { timeout: 6000 }),
+        http('https://arbitrum.drpc.org', { timeout: 6000 }),
+        http('https://1rpc.io/arb', { timeout: 6000 }),
         http('https://arb1.arbitrum.io/rpc', { timeout: 10000 })
       ])
 });
@@ -58,35 +66,41 @@ const publicClient = createPublicClient({
 const sniperClient = createPublicClient({
   chain: chainToUse,
   transport: process.env.LOCAL_FORK_URL
-    ? http(primaryRpcUrl, { timeout: 8000 })
+    ? http(fastPrimaryRpcUrl, { timeout: 6000 })
     : fallback([
-        http(sniperRpcUrl, { timeout: 6000 }),
-        http('https://arb1.arbitrum.io/rpc', { timeout: 6000 }),
-        http('https://arbitrum-one-rpc.publicnode.com', { timeout: 6000 })
+        http(sniperRpcUrl, { timeout: 4000 }),
+        http('https://arbitrum-one-rpc.publicnode.com', { timeout: 4000 }),
+        http('https://arbitrum.drpc.org', { timeout: 4000 })
       ])
 });
 
-// Çoklu Ücretsiz Okuma Havuzu (Round-Robin): 3.800+ cüzdanlık taramalarda özel API kotasını hiç harcamadan yükü 4 ücretsiz düğüme dağıtır.
+// Hızlı Multicall Okuma Havuzu (Round-Robin): 3.5s gecikmeli arb1.arbitrum.io/rpc bu havuzdan çıkarılmıştır!
 const readClients = process.env.LOCAL_FORK_URL
   ? [publicClient]
   : [
       createPublicClient({
         chain: arbitrum,
-        transport: http(primaryRpcUrl, { timeout: 10000 })
+        transport: http('https://arbitrum-one-rpc.publicnode.com', { timeout: 6000 })
       }),
       createPublicClient({
         chain: arbitrum,
-        transport: http('https://arbitrum-one-rpc.publicnode.com', { timeout: 10000 })
+        transport: http('https://arbitrum.drpc.org', { timeout: 6000 })
       }),
       createPublicClient({
         chain: arbitrum,
-        transport: http('https://arbitrum.drpc.org', { timeout: 10000 })
-      }),
-      createPublicClient({
-        chain: arbitrum,
-        transport: http('https://1rpc.io/arb', { timeout: 10000 })
+        transport: http('https://1rpc.io/arb', { timeout: 6000 })
       })
     ];
+
+// Geniş Blok Aralıklı Olay Tarama (eth_getLogs) İstemcisi:
+// publicnode/drpc/1rpc geniş getLogs sorgularını reddettiği ve Alchemy Free 10 blokla sınırlı olduğu için
+// getLogs taramaları öncelikli olarak arb1.arbitrum.io/rpc üzerinde çalıştırılır.
+const logClient = createPublicClient({
+  chain: chainToUse,
+  transport: process.env.LOCAL_FORK_URL
+    ? http(fastPrimaryRpcUrl, { timeout: 15000 })
+    : http('https://arb1.arbitrum.io/rpc', { timeout: 20000 })
+});
 
 let readClientIndex = 0;
 function getNextReadClient() {
@@ -97,7 +111,7 @@ function getNextReadClient() {
 
 // Çoklu Yazma (Broadcast) Havuzu: İşlemi aynı milisaniyede hem doğrudan Arbitrum Resmi Sequencer'ına, hem Özel Alchemy düğümüne hem de alternatif düğümlere ateşler.
 const broadcastWalletClients = process.env.LOCAL_FORK_URL
-  ? [createWalletClient({ account, chain: chainToUse, transport: http(primaryRpcUrl) })]
+  ? [createWalletClient({ account, chain: chainToUse, transport: http(fastPrimaryRpcUrl) })]
   : [
       createWalletClient({
         account,
@@ -238,7 +252,7 @@ function sendTelegramAlert(key: string, message: string, minIntervalMs = 0) {
 }
 
 const rawBotContractAddr = (
-  process.env.BOT_CONTRACT_ADDRESS || '0x1CA5f9cACbee5533E03FD643E2d4BC89af667c6c'
+  process.env.BOT_CONTRACT_ADDRESS || '0x0FC0531A67bA78B324d9482da48e4ce224B29C3e'
 )
   .trim()
   .toLowerCase();
@@ -298,6 +312,7 @@ let AAVE_RESERVE_ASSETS: ReserveAsset[] = [
 const getAllReservesTokensAbi = parseAbiItem(
   'function getAllReservesTokens() view returns ((string symbol, address tokenAddress)[])'
 );
+const getReservesListAbi = parseAbiItem('function getReservesList() view returns (address[])');
 const getReserveConfigurationDataAbi = parseAbiItem(
   'function getReserveConfigurationData(address asset) view returns (uint256 decimals, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus, uint256 reserveFactor, bool usageAsCollateralEnabled, bool borrowingEnabled, bool stableBorrowRateEnabled, bool isActive, bool isFrozen)'
 );
@@ -322,6 +337,9 @@ const answerUpdatedEventAbi = parseAbiItem(
 const quoteExactInputSingleAbi = parseAbiItem(
   'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)'
 );
+const quoteExactInputAbi = parseAbiItem(
+  'function quoteExactInput(bytes path, uint256 amountIn) external returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)'
+);
 const getUserEModeAbi = parseAbiItem('function getUserEMode(address user) view returns (uint256)');
 const borrowEventAbi = parseAbiItem(
   'event Borrow(address indexed reserve, address user, address indexed onBehalfOf, uint256 amount, uint8 interestRateMode, uint256 borrowRate, uint16 indexed referralCode)'
@@ -338,18 +356,37 @@ const botContractAbi = parseAbi([
   'function triggerLiquidation(address debtAsset, address collateralAsset, address userToLiquidate, uint256 debtToCover, uint24 poolFee, uint256 minProfit) external'
 ]);
 
-// Aave ProtocolDataProvider üzerinden tüm aktif rezervleri, ondalık basamaklarını, gerçek tasfiye bonuslarını ve eMode kategori bitmap'lerini dinamik çeker.
+// Aave ProtocolDataProvider ve Pool.getReservesList() üzerinden tüm aktif rezervleri, gerçek reserveId slot indekslerini,
+// gerçek tasfiye bonuslarını ve eMode kategori bitmap'lerini (1..32) dinamik çeker.
 async function syncDynamicReservesFromProtocol() {
   try {
-    const rawTokens = (await publicClient.readContract({
-      address: AAVE_DATA_PROVIDER_ADDRESS,
-      abi: [getAllReservesTokensAbi],
-      functionName: 'getAllReservesTokens'
-    })) as readonly { symbol: string; tokenAddress: `0x${string}` }[];
+    const [rawTokens, reservesListRaw] = await Promise.all([
+      publicClient.readContract({
+        address: AAVE_DATA_PROVIDER_ADDRESS,
+        abi: [getAllReservesTokensAbi],
+        functionName: 'getAllReservesTokens'
+      }) as Promise<readonly { symbol: string; tokenAddress: `0x${string}` }[]>,
+      publicClient
+        .readContract({
+          address: AAVE_POOL_ADDRESS,
+          abi: [getReservesListAbi],
+          functionName: 'getReservesList'
+        })
+        .catch(() => [] as readonly `0x${string}`[])
+    ]);
 
     if (!rawTokens || rawTokens.length === 0) return;
 
-    const eModeIds = Array.from({ length: 16 }, (_, idx) => idx + 1);
+    const reserveIdByAddress = new Map<string, number>();
+    if (Array.isArray(reservesListRaw)) {
+      reservesListRaw.forEach((addr, slotIdx) => {
+        if (addr && isAddress(addr)) {
+          reserveIdByAddress.set(addr.toLowerCase(), slotIdx);
+        }
+      });
+    }
+
+    const eModeIds = Array.from({ length: 32 }, (_, idx) => idx + 1);
     const configContracts = [
       ...rawTokens.map(t => ({
         address: AAVE_DATA_PROVIDER_ADDRESS,
@@ -396,12 +433,13 @@ async function syncDynamicReservesFromProtocol() {
         if (!isActive) continue;
         // Aave'de liquidationBonus 10500 formatındadır (10000 = %100, 10500 = %5 bonus -> 1.05)
         const bonusNum = Number(liquidationBonus) / 10000;
+        const exactSlotId = reserveIdByAddress.get(token.tokenAddress.toLowerCase());
         discovered.push({
           name: token.symbol,
           address: getAddress(token.tokenAddress),
           decimals: Number(decimals),
           liquidationBonusRatio: bonusNum >= 1.01 ? bonusNum : 1.05,
-          reserveId: i
+          reserveId: exactSlotId !== undefined ? exactSlotId : i
         });
       }
     }
@@ -435,7 +473,7 @@ async function syncDynamicReservesFromProtocol() {
     if (discovered.length >= 10) {
       AAVE_RESERVE_ASSETS = discovered;
 
-      // Aktif rezervlerin Chainlink Aggregator adreslerini dinamik olarak keşfet
+      // Yalnızca gerçek .aggregator() metoduna sahip olan Chainlink kontratlarını dinle (CAPO/adaptör kontratlarını hariç tut)
       try {
         const sourceContracts = discovered.map(d => ({
           address: AAVE_ORACLE_ADDRESS,
@@ -463,13 +501,20 @@ async function syncDynamicReservesFromProtocol() {
             contracts: aggContracts,
             allowFailure: true
           });
-          const aggSet = new Set<`0x${string}`>(chainlinkAggregators);
+          const aggSet = new Set<`0x${string}`>([
+            '0xa5E1a36938769cbd5a26f5e19D8FCB379f597c83', // WETH / USD
+            '0xE7c522c60bA7f1b5E398D2312593713e2B19aeb0', // WBTC / USD
+            '0xB72359B2dc04Ff363e094648DF78247c98297c20'  // ARB / USD
+          ]);
           for (let k = 0; k < sources.length; k++) {
             const ar = aggRes[k];
-            if (ar?.status === 'success' && ar.result && isAddress(ar.result as string)) {
+            if (
+              ar?.status === 'success' &&
+              ar.result &&
+              isAddress(ar.result as string) &&
+              ar.result !== '0x0000000000000000000000000000000000000000'
+            ) {
               aggSet.add(getAddress(ar.result as string));
-            } else {
-              aggSet.add(sources[k]);
             }
           }
           chainlinkAggregators = Array.from(aggSet);
@@ -479,7 +524,7 @@ async function syncDynamicReservesFromProtocol() {
       }
 
       logInfo(
-        `Synchronized ${discovered.length} active Aave V3 reserves, ${eModeCategories.size} eMode categories, and ${chainlinkAggregators.length} Chainlink price feeds dynamically (${discovered.map(d => d.name).join(', ')}).`
+        `Synchronized ${discovered.length} active Aave V3 reserves, ${eModeCategories.size} eMode categories, and ${chainlinkAggregators.length} verified Chainlink aggregators (${discovered.map(d => d.name).join(', ')}).`
       );
     }
   } catch (err: any) {
@@ -517,6 +562,7 @@ interface LiquidationCandidate {
   collateralUSD: number;
   liquidationBonusRatio: number;
   bestPoolFee: number;
+  isSameAsset: boolean;
 }
 
 const targetStrikeCache = new Map<
@@ -608,7 +654,8 @@ function scheduleSaveUsers() {
 // 4. GERÇEK USD DEĞERİNE GÖRE ÇOKLU ADAY ÇİFT TESPİTİ (MULTICALL)
 // ============================================================================
 async function getLiquidationCandidates(
-  userAddress: `0x${string}`
+  userAddress: `0x${string}`,
+  fastStrikeMode = false
 ): Promise<LiquidationCandidate[]> {
   try {
     const reservesSnapshot = AAVE_RESERVE_ASSETS;
@@ -639,8 +686,9 @@ async function getLiquidationCandidates(
     let userEMode = 0n;
     let results: any[] = [];
 
-    for (let attempt = 0; attempt < readClients.length; attempt++) {
-      const client = getNextReadClient();
+    const maxAttempts = fastStrikeMode ? 2 : readClients.length;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const client = fastStrikeMode && attempt === 0 ? sniperClient : getNextReadClient();
       try {
         results = await client.multicall({ contracts, allowFailure: true });
         const priceResult = results[results.length - 2];
@@ -747,98 +795,166 @@ async function getLiquidationCandidates(
     const candidates: LiquidationCandidate[] = [];
     for (const d of userDebts) {
       for (const c of userCollaterals) {
-        if (d.asset.address.toLowerCase() !== c.asset.address.toLowerCase()) {
-          // Aave v3.3 kuralı: eMode bonusu yalnızca o eMode kategorisinin collateralBitmap'ine dahil olan teminatlarda geçerlidir
-          const isCollateralInEMode =
-            eModeCat !== undefined &&
-            c.asset.reserveId >= 0 &&
-            ((eModeCat.collateralBitmap >> BigInt(c.asset.reserveId)) & 1n) === 1n;
-          const effectiveBonusRatio = isCollateralInEMode
-            ? eModeCat.bonusRatio
-            : c.asset.liquidationBonusRatio;
+        const isSameAsset = d.asset.address.toLowerCase() === c.asset.address.toLowerCase();
+        // Aave v3.3 kuralı: eMode bonusu yalnızca o eMode kategorisinin collateralBitmap'ine dahil olan teminatlarda geçerlidir
+        const isCollateralInEMode =
+          eModeCat !== undefined &&
+          c.asset.reserveId >= 0 &&
+          ((eModeCat.collateralBitmap >> BigInt(c.asset.reserveId)) & 1n) === 1n;
+        const effectiveBonusRatio = isCollateralInEMode
+          ? eModeCat.bonusRatio
+          : c.asset.liquidationBonusRatio;
 
-          candidates.push({
-            debtAsset: d.asset.address,
-            debtName: d.asset.name,
-            debtAmount: d.amount,
-            debtDecimals: d.asset.decimals,
-            debtPriceUSD: d.priceUSD,
-            debtUSD: d.usd,
-            collateralAsset: c.asset.address,
-            collateralName: c.asset.name,
-            collateralDecimals: c.asset.decimals,
-            collateralPriceUSD: c.priceUSD,
-            collateralUSD: c.usd,
-            liquidationBonusRatio: effectiveBonusRatio,
-            bestPoolFee: 500
-          });
-        }
+        candidates.push({
+          debtAsset: d.asset.address,
+          debtName: d.asset.name,
+          debtAmount: d.amount,
+          debtDecimals: d.asset.decimals,
+          debtPriceUSD: d.priceUSD,
+          debtUSD: d.usd,
+          collateralAsset: c.asset.address,
+          collateralName: c.asset.name,
+          collateralDecimals: c.asset.decimals,
+          collateralPriceUSD: c.priceUSD,
+          collateralUSD: c.usd,
+          liquidationBonusRatio: effectiveBonusRatio,
+          bestPoolFee: 500,
+          isSameAsset
+        });
       }
     }
 
-    // Beklenen brüt tasfiye primine (kapatılabilir USD * bonus yüzdesi) göre en kârlı çiftleri sırala
+    // Beklenen net tasfiye primine (kapatılabilir USD * (bonus - kesinti)) göre en kârlı çiftleri sırala
     candidates.sort((a, b) => {
       const covA = Math.min(a.debtUSD, a.collateralUSD / a.liquidationBonusRatio);
       const covB = Math.min(b.debtUSD, b.collateralUSD / b.liquidationBonusRatio);
-      const bonusA = covA * (a.liquidationBonusRatio - 1.0);
-      const bonusB = covB * (b.liquidationBonusRatio - 1.0);
-      return bonusB - bonusA;
+      const feeA = a.isSameAsset ? 0.0005 : 0.001;
+      const feeB = b.isSameAsset ? 0.0005 : 0.001;
+      const netA = covA * (a.liquidationBonusRatio - 1.0 - feeA);
+      const netB = covB * (b.liquidationBonusRatio - 1.0 - feeB);
+      return netB - netA;
     });
 
     const topCandidates = candidates.slice(0, 3);
     if (topCandidates.length > 0) {
-      // Uniswap V3 QuoterV2 (Sıfır Gas, Multicall): Her aday çift için [100, 500, 3000, 10000] havuzlarını önceden sorgula
-      // ve en yüksek net çıktıyı veren havuz komisyonunu (bestPoolFee) vuruş önbelleğine kaydet
-      const feeTiers = [100, 500, 3000, 10000] as const;
-      const quoteContracts = topCandidates.flatMap(cand => {
-        const estCoverUSD = Math.min(cand.debtUSD, cand.collateralUSD / cand.liquidationBonusRatio);
-        const estColTokens =
-          cand.collateralPriceUSD > 0
-            ? (estCoverUSD * cand.liquidationBonusRatio) / cand.collateralPriceUSD
-            : 0;
-        const estColAmountRaw =
-          BigInt(
-            Math.max(1, Math.floor(estColTokens * Math.pow(10, Math.min(cand.collateralDecimals, 8))))
-          ) * (cand.collateralDecimals > 8 ? 10n ** BigInt(cand.collateralDecimals - 8) : 1n);
+      // Vuruş anında (fastStrikeMode = true) zaman kaybetmemek için QuoterV2 sorgusunu atla;
+      // ön-hazırlık (pre-cache) aşamasında ise hem tekil (Single-Hop) hem 2-Hop rotaları QuoterV2 ile fiyatla
+      const crossAssetIndices = topCandidates
+        .map((c, idx) => (!c.isSameAsset ? idx : -1))
+        .filter(idx => idx >= 0);
 
-        return feeTiers.map(fee => ({
-          address: UNISWAP_QUOTER_V2_ADDRESS,
-          abi: [quoteExactInputSingleAbi] as const,
-          functionName: 'quoteExactInputSingle' as const,
-          args: [
-            {
-              tokenIn: cand.collateralAsset,
-              tokenOut: cand.debtAsset,
-              amountIn: estColAmountRaw,
-              fee,
-              sqrtPriceLimitX96: 0n
-            }
-          ] as const
-        }));
-      });
+      if (!fastStrikeMode && crossAssetIndices.length > 0) {
+        const feeTiers = [100, 500, 3000, 10000] as const;
+        const wethHub = '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1' as const;
+        const usdcHub = '0xaf88d065e77c8cC2239327C5EDb3A432268e5831' as const;
 
-      try {
-        const quoteResults = await getNextReadClient().multicall({
-          contracts: quoteContracts,
-          allowFailure: true
+        const estRawByIdx = new Map<number, bigint>();
+        const singleHopContracts = crossAssetIndices.flatMap(cIdx => {
+          const cand = topCandidates[cIdx];
+          const estCoverUSD = Math.min(cand.debtUSD, cand.collateralUSD / cand.liquidationBonusRatio);
+          const estColTokens =
+            cand.collateralPriceUSD > 0
+              ? (estCoverUSD * cand.liquidationBonusRatio) / cand.collateralPriceUSD
+              : 0;
+          const estColAmountRaw =
+            BigInt(
+              Math.max(1, Math.floor(estColTokens * Math.pow(10, Math.min(cand.collateralDecimals, 8))))
+            ) * (cand.collateralDecimals > 8 ? 10n ** BigInt(cand.collateralDecimals - 8) : 1n);
+          estRawByIdx.set(cIdx, estColAmountRaw);
+
+          return feeTiers.map(fee => ({
+            address: UNISWAP_QUOTER_V2_ADDRESS,
+            abi: [quoteExactInputSingleAbi] as const,
+            functionName: 'quoteExactInputSingle' as const,
+            args: [
+              {
+                tokenIn: cand.collateralAsset,
+                tokenOut: cand.debtAsset,
+                amountIn: estColAmountRaw,
+                fee,
+                sqrtPriceLimitX96: 0n
+              }
+            ] as const
+          }));
         });
-        for (let cIdx = 0; cIdx < topCandidates.length; cIdx++) {
-          let bestOut = 0n;
-          let bestFee = 500;
-          for (let fIdx = 0; fIdx < feeTiers.length; fIdx++) {
-            const qRes = quoteResults[cIdx * feeTiers.length + fIdx];
-            if (qRes?.status === 'success' && Array.isArray(qRes.result)) {
-              const amountOut = qRes.result[0] as bigint;
-              if (amountOut > bestOut) {
-                bestOut = amountOut;
-                bestFee = feeTiers[fIdx];
+
+        try {
+          const quoteResults = await getNextReadClient().multicall({
+            contracts: singleHopContracts,
+            allowFailure: true
+          });
+
+          const multiHopFallbackIndices: number[] = [];
+          for (let k = 0; k < crossAssetIndices.length; k++) {
+            const cIdx = crossAssetIndices[k];
+            let bestOut = 0n;
+            let bestFee = 500;
+            for (let fIdx = 0; fIdx < feeTiers.length; fIdx++) {
+              const qRes = quoteResults[k * feeTiers.length + fIdx];
+              if (qRes?.status === 'success' && Array.isArray(qRes.result)) {
+                const amountOut = qRes.result[0] as bigint;
+                if (amountOut > bestOut) {
+                  bestOut = amountOut;
+                  bestFee = feeTiers[fIdx];
+                }
               }
             }
+            if (bestOut > 0n) {
+              topCandidates[cIdx].bestPoolFee = bestFee;
+            } else {
+              multiHopFallbackIndices.push(cIdx);
+            }
           }
-          topCandidates[cIdx].bestPoolFee = bestFee;
+
+          // Tekil havuzu olmayan çiftler için WETH ve USDC köprüleri üzerinden 2-Hop QuoterV2 sorgusu
+          if (multiHopFallbackIndices.length > 0) {
+            const twoHopRoutes = [
+              { fee1: 500, hub: wethHub, fee2: 500 },
+              { fee1: 3000, hub: wethHub, fee2: 500 },
+              { fee1: 500, hub: usdcHub, fee2: 500 }
+            ] as const;
+
+            const multiHopContracts = multiHopFallbackIndices.flatMap(cIdx => {
+              const cand = topCandidates[cIdx];
+              const amountIn = estRawByIdx.get(cIdx) || 1n;
+              return twoHopRoutes.map(r => ({
+                address: UNISWAP_QUOTER_V2_ADDRESS,
+                abi: [quoteExactInputAbi] as const,
+                functionName: 'quoteExactInput' as const,
+                args: [
+                  encodePacked(
+                    ['address', 'uint24', 'address', 'uint24', 'address'],
+                    [cand.collateralAsset, r.fee1, r.hub, r.fee2, cand.debtAsset]
+                  ),
+                  amountIn
+                ] as const
+              }));
+            });
+
+            const mhResults = await getNextReadClient().multicall({
+              contracts: multiHopContracts,
+              allowFailure: true
+            });
+            for (let m = 0; m < multiHopFallbackIndices.length; m++) {
+              const cIdx = multiHopFallbackIndices[m];
+              let bestMhOut = 0n;
+              let bestMhFee = 500;
+              for (let rIdx = 0; rIdx < twoHopRoutes.length; rIdx++) {
+                const mRes = mhResults[m * twoHopRoutes.length + rIdx];
+                if (mRes?.status === 'success' && Array.isArray(mRes.result)) {
+                  const out = mRes.result[0] as bigint;
+                  if (out > bestMhOut) {
+                    bestMhOut = out;
+                    bestMhFee = twoHopRoutes[rIdx].fee1;
+                  }
+                }
+              }
+              topCandidates[cIdx].bestPoolFee = bestMhFee;
+            }
+          }
+        } catch {
+          // Quoter sorgusu başarısız olursa varsayılan 500 (ve sözleşme içi otomatik havuz yedeği) kullanılır
         }
-      } catch {
-        // Quoter sorgusu başarısız olursa varsayılan 500 (ve sözleşme içi otomatik havuz yedeği) kullanılır
       }
 
       targetStrikeCache.set(userAddress, { candidates: topCandidates, updatedAt: Date.now() });
@@ -874,12 +990,12 @@ async function executeLiquidationStrike(
 
   const cached = targetStrikeCache.get(userAddress);
   const candidates =
-    cached && now - cached.updatedAt < 60000
+    cached && now - cached.updatedAt < 90000
       ? cached.candidates
-      : await getLiquidationCandidates(userAddress);
+      : await getLiquidationCandidates(userAddress, true);
 
   if (candidates.length === 0) {
-    logInfo(`No liquidatable distinct debt/collateral pair found for ${userAddress}.`);
+    logInfo(`No liquidatable debt/collateral pair found for ${userAddress}.`);
     cooldowns.set(userAddress, now + 30000);
     return;
   }
@@ -894,8 +1010,45 @@ async function executeLiquidationStrike(
   }
 
   const plans: StrikePlan[] = [];
-  // Tahmini Arbitrum gas maliyeti (~900,000 gas * güncel gas fiyatı * canlı Oracle WETH fiyatı)
-  const estimatedGasCostUSD = Math.max(0.02, cachedGasPriceGwei * 0.0009 * cachedEthPriceUSD);
+  // Tahmini Arbitrum gas maliyeti (~850,000 gas * güncel gas fiyatı * canlı Oracle WETH fiyatı)
+  const estimatedGasCostUSD = Math.max(0.02, cachedGasPriceGwei * 0.00085 * cachedEthPriceUSD);
+  // Aave v3.3 MustNotLeaveDust (0xb629b0e4) sınırı $1,000 USD'dir; fiyat dalgalanmasına karşı $1,060 USD güvenli taban uygulanır
+  const DUST_FLOOR_USD = 1060.0;
+
+  const buildPlanIfProfitable = (
+    target: LiquidationCandidate,
+    coverAmountRaw: bigint,
+    coverUSD: number,
+    label: string
+  ): StrikePlan | null => {
+    if (coverUSD < MIN_STRIKE_DEBT_USD || coverAmountRaw <= 0n) return null;
+
+    // Gerçek kesinti oranı: Aynı tokenda swap yoktur (yalnızca %0.05 Aave flashloan ücreti);
+    // farklı tokenda ise %0.05 flashloan + seçilen Uniswap havuz ücreti (örn. fee=100 için %0.01, fee=500 için %0.05)
+    const swapFeeRatio = target.isSameAsset ? 0 : (target.bestPoolFee || 500) / 1_000_000;
+    const totalFeeRatio = 0.0005 + swapFeeRatio;
+    const grossBonusUSD = coverUSD * (target.liquidationBonusRatio - 1.0);
+    const protocolAndSwapFeeUSD = coverUSD * totalFeeRatio;
+    const expectedNetBonusUSD = grossBonusUSD - protocolAndSwapFeeUSD - estimatedGasCostUSD;
+
+    if (expectedNetBonusUSD < MIN_EXPECTED_NET_PROFIT_USD) return null;
+
+    const minProfitUSD = Math.max(0.05, estimatedGasCostUSD + MIN_EXPECTED_NET_PROFIT_USD);
+    const minProfitTokens = target.debtPriceUSD > 0 ? minProfitUSD / target.debtPriceUSD : 0;
+    const minProfitRaw =
+      BigInt(
+        Math.max(1, Math.floor(minProfitTokens * Math.pow(10, Math.min(target.debtDecimals, 8))))
+      ) * (target.debtDecimals > 8 ? 10n ** BigInt(target.debtDecimals - 8) : 1n);
+
+    return {
+      target,
+      amount: coverAmountRaw,
+      minProfitRaw,
+      usd: coverUSD,
+      expectedNetBonusUSD,
+      label
+    };
+  };
 
   for (const target of candidates) {
     // Aave v3.3'te HF <= 0.95 veya borç/teminat < $2,000 olduğunda %100 kapatma uygulanır.
@@ -916,46 +1069,60 @@ async function executeLiquidationStrike(
       fullCoverUSD = maxCoverableByCollateralUSD;
     }
 
-    if (fullCoverUSD < MIN_STRIKE_DEBT_USD || fullDebtToCover === 0n) {
-      continue;
+    // AAVE V3.3 MustNotLeaveDust() (0xb629b0e4) KORUMASI:
+    // Eğer kısmi tasfiye sonrasında geride kalan teminat veya geride kalan borç (0, $1,060) aralığına düşüyorsa,
+    // Aave işlemi MustNotLeaveDust() ile reddeder (Örn: Blok 524318291, 0xD6d6CD... WBTC/USDC vakası).
+    // Bu durumda geride tam >= $1,060 teminat ve >= $1,060 borç bırakacak DUST-SAFE tutarı hesaplayıp ilk sıraya koy!
+    const remCollateralAfterFullUSD =
+      target.collateralUSD - fullCoverUSD * target.liquidationBonusRatio;
+    const remDebtAfterFullUSD = target.debtUSD - fullCoverUSD;
+    const leavesCollateralDust =
+      remCollateralAfterFullUSD > 5.0 && remCollateralAfterFullUSD < DUST_FLOOR_USD;
+    const leavesDebtDust = remDebtAfterFullUSD > 5.0 && remDebtAfterFullUSD < DUST_FLOOR_USD;
+
+    if (leavesCollateralDust || leavesDebtDust) {
+      let dustSafeCoverUSD = fullCoverUSD;
+      if (leavesCollateralDust && target.collateralUSD > DUST_FLOOR_USD) {
+        dustSafeCoverUSD = Math.min(
+          dustSafeCoverUSD,
+          (target.collateralUSD - DUST_FLOOR_USD) / target.liquidationBonusRatio
+        );
+      }
+      if (leavesDebtDust && target.debtUSD > DUST_FLOOR_USD) {
+        dustSafeCoverUSD = Math.min(dustSafeCoverUSD, target.debtUSD - DUST_FLOOR_USD);
+      }
+      if (dustSafeCoverUSD >= MIN_STRIKE_DEBT_USD && target.debtUSD > 0) {
+        const dustScaleBps = BigInt(Math.floor((dustSafeCoverUSD / target.debtUSD) * 10000));
+        const dustSafeAmountRaw = (target.debtAmount * dustScaleBps) / 10000n;
+        const dustSafePlan = buildPlanIfProfitable(
+          target,
+          dustSafeAmountRaw,
+          dustSafeCoverUSD,
+          'DUST-SAFE'
+        );
+        if (dustSafePlan) plans.push(dustSafePlan);
+      }
     }
 
-    // Tahmini net kâr kontrolü: Brüt Bonus - (%0.05 FlashLoan + %0.30 Swap) - Tahmini Gas
-    const grossBonusUSD = fullCoverUSD * (target.liquidationBonusRatio - 1.0);
-    const protocolAndSwapFeeUSD = fullCoverUSD * 0.0035;
-    const expectedNetBonusUSD = grossBonusUSD - protocolAndSwapFeeUSD - estimatedGasCostUSD;
+    const fullPlan = buildPlanIfProfitable(target, fullDebtToCover, fullCoverUSD, 'FULL');
+    if (fullPlan) plans.push(fullPlan);
 
-    if (expectedNetBonusUSD < MIN_EXPECTED_NET_PROFIT_USD) {
-      continue;
-    }
-
-    // Sözleşme içi minProfit garantisi: En az tahmini gas maliyeti + minimum net kâr ($0.15) tutarını karşılayacak borç tokenı miktarı
-    const minProfitUSD = Math.max(0.05, estimatedGasCostUSD + MIN_EXPECTED_NET_PROFIT_USD);
-    const minProfitTokens =
-      target.debtPriceUSD > 0 ? minProfitUSD / target.debtPriceUSD : 0;
-    const minProfitRaw = BigInt(
-      Math.max(1, Math.floor(minProfitTokens * Math.pow(10, Math.min(target.debtDecimals, 8))))
-    ) * (target.debtDecimals > 8 ? 10n ** BigInt(target.debtDecimals - 8) : 1n);
-
-    plans.push({
-      target,
-      amount: fullDebtToCover,
-      minProfitRaw,
-      usd: fullCoverUSD,
-      expectedNetBonusUSD,
-      label: 'FULL'
-    });
-
-    // Aave v3.3 toz kalıntı (dust) kuralına takılmamak için sadece kalan borcun >$5,000 olduğu büyük pozisyonlarda %50 kısmi yedek plan ekle
-    if (fullCoverUSD >= 10000 && target.debtUSD - fullCoverUSD / 2 >= 5000) {
-      plans.push({
+    // Kısmi yedek plan: Kalan borç ve kalan teminat $1,060 toz sınırının üzerindeyse %50 kısmi planı da paralel simülasyona ekle
+    const halfCoverUSD = fullCoverUSD / 2;
+    const remColHalfUSD = target.collateralUSD - halfCoverUSD * target.liquidationBonusRatio;
+    const remDebtHalfUSD = target.debtUSD - halfCoverUSD;
+    if (
+      halfCoverUSD >= MIN_STRIKE_DEBT_USD &&
+      remDebtHalfUSD >= DUST_FLOOR_USD &&
+      remColHalfUSD >= DUST_FLOOR_USD
+    ) {
+      const partialPlan = buildPlanIfProfitable(
         target,
-        amount: fullDebtToCover / 2n,
-        minProfitRaw,
-        usd: fullCoverUSD / 2,
-        expectedNetBonusUSD: expectedNetBonusUSD / 2,
-        label: 'PARTIAL-50%'
-      });
+        fullDebtToCover / 2n,
+        halfCoverUSD,
+        'PARTIAL-50%'
+      );
+      if (partialPlan) plans.push(partialPlan);
     }
   }
 
@@ -996,11 +1163,32 @@ async function executeLiquidationStrike(
         const simulatedGas = sim.value.request.gas;
         const safeGasLimit = simulatedGas ? (simulatedGas * 130n) / 100n : 1200000n;
 
+        // Dinamik Rekabetçi Priority Fee ve Yüksek BaseFee Tavanı:
+        // Oynaklık dalgalarında baseFee 0.05 Gwei'i aştığında işlemin reddedilmemesi için en az 0.8 Gwei tavan tanımlanır
+        // ve beklenen net kârın %12'sine kadar (0.05 Gwei .. 25 Gwei arası) rekabetçi priority fee verilir.
+        const maxPriorityBudgetETH =
+          cachedEthPriceUSD > 0 ? (plan.expectedNetBonusUSD * 0.12) / cachedEthPriceUSD : 0;
+        const rawPriorityWei =
+          safeGasLimit > 0n
+            ? BigInt(Math.floor((maxPriorityBudgetETH * 1e18) / Number(safeGasLimit)))
+            : 50_000_000n;
+        const minPriorityWei = 50_000_000n; // 0.05 Gwei
+        const maxPriorityWei = 25_000_000_000n; // 25 Gwei
+        const priorityFeeWei =
+          rawPriorityWei < minPriorityWei
+            ? minPriorityWei
+            : rawPriorityWei > maxPriorityWei
+              ? maxPriorityWei
+              : rawPriorityWei;
+
+        const baseCeilingWei =
+          cachedGasPriceWei * 4n > 800_000_000n ? cachedGasPriceWei * 4n : 800_000_000n;
+
         const txOptions: any = {
           ...sim.value.request,
           gas: safeGasLimit,
-          maxFeePerGas: cachedGasPriceWei * 2n + 10000000n,
-          maxPriorityFeePerGas: 0n
+          maxFeePerGas: baseCeilingWei + priorityFeeWei,
+          maxPriorityFeePerGas: priorityFeeWei
         };
 
         // NONCE ÇAKIŞMA KORUMASI: Gönderim öncesinde senkron olarak nonce ayır; hata olursa catch bloğunda ağdan geri senkronize edilir
@@ -1134,6 +1322,11 @@ async function processUserAccountData(
         `HIGH RISK BORROWER PROMOTED TO SNIPER RADAR | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`
       );
     }
+    // Kritik (1.045 <= HF <= 1.12) hedefler için de borç/teminat çiftlerini önceden önbelleğe al (Ani fiyat düşüşünde 0ms vuruş hazırlığı)
+    const cached = targetStrikeCache.get(userAddress);
+    if (!cached || now - cached.updatedAt > 90000) {
+      getLiquidationCandidates(userAddress).catch(() => {});
+    }
   } else {
     imminentTargets.delete(userAddress);
     ultraCriticalTargets.delete(userAddress);
@@ -1187,8 +1380,77 @@ async function checkUsersBatch(
 }
 
 // ============================================================================
-// 7. 3 KADEMELİ KESKİN NİŞANCI VE RADAR DÖNGÜLERİ (250ms / 2.5s / 15s)
+// 7. 3 KADEMELİ KESKİN NİŞANCI, RADAR VE SESSİZ SVR ORACLE DÖNGÜLERİ
 // ============================================================================
+async function triggerAllCriticalSweep() {
+  const tasks: Promise<void>[] = [];
+  if (imminentTargets.size > 0) {
+    tasks.push(checkUsersBatch(Array.from(imminentTargets), true, true));
+  }
+  if (ultraCriticalTargets.size > 0) {
+    const nonImminent = Array.from(ultraCriticalTargets).filter(u => !imminentTargets.has(u));
+    if (nonImminent.length > 0) {
+      tasks.push(checkUsersBatch(nonImminent, true, false));
+    }
+  }
+  if (criticalTargets.size > 0) {
+    tasks.push(checkUsersBatch(Array.from(criticalTargets), true, false));
+  }
+  if (tasks.length > 0) {
+    await Promise.allSettled(tasks);
+  }
+}
+
+// Chainlink SVR Wrapper Sessiz Fiyat Açılımı Dedektörü:
+// WETH (0xbD41b154...) ve WBTC (0xDe4Af8b4...) SVR wrapper kontratları ~30 saniye sonunda AnswerUpdated olayı yaymadan
+// fiyatı açtığı için AaveOracle.getAssetsPrices() her 1 saniyede bir doğrudan kontrol edilir;
+// herhangi bir varlığın fiyatı değiştiği milisaniyede tüm kritik hedefler (imminent + ultraCritical + critical) taranır.
+async function svrOraclePriceShiftLoop() {
+  try {
+    if (
+      AAVE_RESERVE_ASSETS.length > 0 &&
+      (imminentTargets.size > 0 || ultraCriticalTargets.size > 0 || criticalTargets.size > 0)
+    ) {
+      const allAssets = AAVE_RESERVE_ASSETS.map(a => a.address);
+      const client = getNextReadClient();
+      const freshPrices = (await client.readContract({
+        address: AAVE_ORACLE_ADDRESS,
+        abi: [getAssetsPricesAbi],
+        functionName: 'getAssetsPrices',
+        args: [allAssets]
+      })) as bigint[];
+
+      if (freshPrices && freshPrices.length === allAssets.length) {
+        let priceChanged = false;
+        if (
+          lastValidOraclePrices &&
+          lastValidOraclePrices.prices.length === freshPrices.length
+        ) {
+          for (let i = 0; i < freshPrices.length; i++) {
+            if (freshPrices[i] !== lastValidOraclePrices.prices[i]) {
+              priceChanged = true;
+              break;
+            }
+          }
+        }
+        lastValidOraclePrices = {
+          prices: freshPrices,
+          updatedAt: Date.now(),
+          count: freshPrices.length
+        };
+
+        if (priceChanged) {
+          await triggerAllCriticalSweep();
+        }
+      }
+    }
+  } catch {
+    // Sıradaki turda devam et
+  } finally {
+    setTimeout(svrOraclePriceShiftLoop, 1000);
+  }
+}
+
 async function ultraCriticalSniperLoop() {
   if (ultraCriticalTargets.size > 0) {
     const targets = Array.from(ultraCriticalTargets);
@@ -1205,8 +1467,8 @@ async function criticalSniperLoop() {
   setTimeout(criticalSniperLoop, 2500);
 }
 
-const MULTICALL_BATCH_SIZE = 35;
-const BATCH_DELAY_MS = 250;
+const MULTICALL_BATCH_SIZE = 45;
+const BATCH_DELAY_MS = 150;
 
 async function generalRadarLoop() {
   if (activeUsers.size > 0) {
@@ -1220,7 +1482,7 @@ async function generalRadarLoop() {
 
     for (let i = 0; i < nonCriticalUsers.length; i += MULTICALL_BATCH_SIZE) {
       const chunk = nonCriticalUsers.slice(i, i + MULTICALL_BATCH_SIZE);
-      await checkUsersBatch(chunk, false);
+      await checkUsersBatch(chunk, true);
       if (i + MULTICALL_BATCH_SIZE < nonCriticalUsers.length) {
         await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
       }
@@ -1231,26 +1493,31 @@ async function generalRadarLoop() {
 }
 
 // ============================================================================
-// 8. GEÇMİŞ BORÇLU DERİN TARAYICISI (onBehalfOf DESTEKLİ) VE ANA MOTOR
+// 8. GEÇMİŞ BORÇLU DERİN TARAYICISI (onBehalfOf DESTEKLİ - 15M BLOK) VE ANA MOTOR
 // ============================================================================
 async function syncRecentBorrowers(currentBlock: bigint) {
-  // Arka planda son 1,200,000 bloğu (~3.5 gün) parça parça tarayarak hem onBehalfOf hem user adreslerini radara katar
-  const LOOKBACK = 1200000n;
-  const CHUNK = 30000n;
+  // NOT_IN_RADAR (%63) körlüğünü ortadan kaldırmak için son 15,000,000 bloğu (~60 gün)
+  // geniş getLogs destekleyen logClient (arb1.arbitrum.io/rpc) üzerinden yeniden denemeli (hiçbir bloğu atlamadan) tarar.
+  const LOOKBACK = 15000000n;
+  const DEFAULT_CHUNK = 25000n;
   let added = 0;
+  let to = currentBlock;
+  const minBlock = currentBlock > LOOKBACK ? currentBlock - LOOKBACK : 1n;
 
-  for (let to = currentBlock; to > currentBlock - LOOKBACK && to > 0n; to -= CHUNK) {
-    const from = to - CHUNK > 0n ? to - CHUNK : 1n;
-    for (const client of readClients) {
+  while (to > minBlock) {
+    let chunkSize = DEFAULT_CHUNK;
+    let success = false;
+
+    for (let retry = 0; retry < 3; retry++) {
+      const from = to > chunkSize ? (to - chunkSize > minBlock ? to - chunkSize : minBlock) : 1n;
       try {
-        const logs = await client.getLogs({
+        const logs = await logClient.getLogs({
           address: AAVE_POOL_ADDRESS,
           event: borrowEventAbi,
           fromBlock: from,
           toBlock: to
         });
         for (const log of logs) {
-          // KRİTİK DÜZELTME: Borcun gerçek sahibi onBehalfOf adresidir (kaldıraç/router kontratlarında user aracıdır)
           const borrower = log.args.onBehalfOf || log.args.user;
           if (borrower && isAddress(borrower)) {
             const checksummed = getAddress(borrower);
@@ -1260,20 +1527,31 @@ async function syncRecentBorrowers(currentBlock: bigint) {
             }
           }
         }
+        to = from > 1n ? from - 1n : 0n;
+        success = true;
         break;
       } catch {
-        // Sıradaki RPC'yi dene
+        // Zaman aşımı veya blok limiti olursa dilimi küçültüp tekrar dene (blokları sessizce atlama!)
+        chunkSize = chunkSize / 2n >= 5000n ? chunkSize / 2n : 5000n;
+        await new Promise(r => setTimeout(r, 800));
       }
     }
+
+    if (!success) {
+      // 3 denemede de yanıt alınamazsa 2 saniye bekle ve küçük dilimle devam et
+      await new Promise(r => setTimeout(r, 2000));
+      to = to > 5000n ? to - 5000n : 0n;
+    }
+
     if (added > 0 && added % 100 === 0) {
       scheduleSaveUsers();
     }
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 250));
   }
 
   if (added > 0) {
     logInfo(
-      `Synchronized ${added} historical borrowers (via onBehalfOf) from recent blocks. Total monitored: ${activeUsers.size}`
+      `Synchronized ${added} historical borrowers (via onBehalfOf, 15M block deep scan). Total monitored: ${activeUsers.size}`
     );
     scheduleSaveUsers();
   }
@@ -1645,10 +1923,11 @@ async function main() {
 
   // Canlı ağda gerçekleşen yeni Borrow ve LiquidationCall olaylarını üst üste binmeyen (non-overlapping) ardışık getLogs döngüsüyle izle
   let lastEventBlock = currentBlock;
+  const eventClients = [logClient, ...readClients];
   async function pollLiveEventsLoop() {
     let lastErr: any = null;
     try {
-      for (const client of readClients) {
+      for (const client of eventClients) {
         try {
           const latestBlock = await client.getBlockNumber();
           latestObservedBlock = latestBlock;
@@ -1679,6 +1958,8 @@ async function main() {
           lastEventBlock = toBlock;
 
           let newUsersAdded = 0;
+          const usersToEvaluateBatch = new Set<`0x${string}`>();
+
           for (const log of borrowLogs) {
             const borrower = log.args?.onBehalfOf || log.args?.user;
             if (borrower && isAddress(borrower)) {
@@ -1687,8 +1968,8 @@ async function main() {
                 activeUsers.add(checksummed);
                 newUsersAdded++;
                 logInfo(`New borrower detected on-chain (onBehalfOf): ${checksummed}`);
-                checkUsersBatch([checksummed], true);
               }
+              usersToEvaluateBatch.add(checksummed);
             }
           }
           if (newUsersAdded > 0) {
@@ -1725,9 +2006,14 @@ async function main() {
                 activeUsers.add(checksummed);
                 scheduleSaveUsers();
               }
-              checkUsersBatch([checksummed], true);
+              usersToEvaluateBatch.add(checksummed);
             }
           }
+
+          if (usersToEvaluateBatch.size > 0) {
+            await checkUsersBatch(Array.from(usersToEvaluateBatch), true);
+          }
+
           lastErr = null;
           break;
         } catch (err: any) {
@@ -1753,34 +2039,48 @@ async function main() {
   pollLiveEventsLoop();
 
   logInfo(
-    `Starting Hybrid Multi-RPC & Private Sniper loops (WSS Block + Chainlink Oracle Trigger + QuoterV2 + 250ms / 2.5s / 15s). Monitoring ${activeUsers.size} addresses across ${AAVE_RESERVE_ASSETS.length} reserves.`
+    `Starting Hybrid Multi-RPC & Private Sniper loops (WSS Block + Chainlink/SVR Oracle Trigger + QuoterV2 + 250ms / 2.5s / 15s). Monitoring ${activeUsers.size} addresses across ${AAVE_RESERVE_ASSETS.length} reserves.`
   );
 
-  // Canlı WebSocket (WSS) Blok + Chainlink Oracle Fiyat Tetikleyicisi (Otomatik Yeniden Abonelik Korumalı)
+  // Canlı WebSocket (WSS) Blok + Chainlink Oracle Fiyat Tetikleyicisi (Soket Sızıntısı Korumalı)
   if (!process.env.LOCAL_FORK_URL) {
     let wsReconnecting = false;
+    let activeWsClient: any = null;
     let unwatchBlock: (() => void) | null = null;
     let unwatchChainlink: (() => void) | null = null;
 
-    const startRealtimeWebSocket = () => {
+    const closeActiveWsSocket = async () => {
+      if (unwatchBlock) {
+        try { unwatchBlock(); } catch {}
+        unwatchBlock = null;
+      }
+      if (unwatchChainlink) {
+        try { unwatchChainlink(); } catch {}
+        unwatchChainlink = null;
+      }
+      if (activeWsClient) {
+        const clientToClose = activeWsClient;
+        activeWsClient = null;
+        try {
+          const rpcClient = await clientToClose.transport?.getRpcClient?.();
+          rpcClient?.close?.();
+        } catch {}
+      }
+    };
+
+    const startRealtimeWebSocket = async () => {
       try {
-        if (unwatchBlock) {
-          try { unwatchBlock(); } catch {}
-          unwatchBlock = null;
-        }
-        if (unwatchChainlink) {
-          try { unwatchChainlink(); } catch {}
-          unwatchChainlink = null;
-        }
+        await closeActiveWsSocket();
 
         const wsClient = createPublicClient({
           chain: arbitrum,
           transport: webSocket(arbitrumWssUrl, { reconnect: true, keepAlive: true })
         });
+        activeWsClient = wsClient;
 
         const handleWsDisconnect = (source: string, err: any) => {
           const shortMsg = (err?.shortMessage || err?.message || 'Socket closed').split('\n')[0];
-          if ( wsReconnecting ) return;
+          if (wsReconnecting) return;
           wsReconnecting = true;
           logInfo(`WebSocket (${source}) connection recycled (${shortMsg}). Re-subscribing in 3s...`);
           setTimeout(() => {
@@ -1790,12 +2090,19 @@ async function main() {
         };
 
         let lastWsSweep = 0;
+        let wsBlockCounter = 0;
         unwatchBlock = wsClient.watchBlockNumber({
-          onBlockNumber: () => {
+          onBlockNumber: blockNum => {
+            latestObservedBlock = blockNum;
+            wsBlockCounter++;
             const now = Date.now();
             if (imminentTargets.size > 0 && now - lastWsSweep >= 150) {
               lastWsSweep = now;
               checkUsersBatch(Array.from(imminentTargets), true, true).catch(() => {});
+            }
+            // Her 8 blokta (~2sn) criticalTargets (1.045..1.12) grubunu da WSS üzerinden tetikle
+            if (wsBlockCounter % 8 === 0 && criticalTargets.size > 0) {
+              checkUsersBatch(Array.from(criticalTargets), true, false).catch(() => {});
             }
           },
           onError: err => handleWsDisconnect('BlockWatcher', err)
@@ -1814,18 +2121,7 @@ async function main() {
               const now = Date.now();
               if (now - lastOracleSweep < 100) return;
               lastOracleSweep = now;
-
-              if (imminentTargets.size > 0) {
-                checkUsersBatch(Array.from(imminentTargets), true, true).catch(() => {});
-              }
-              if (ultraCriticalTargets.size > 0) {
-                const nonImminent = Array.from(ultraCriticalTargets).filter(
-                  u => !imminentTargets.has(u)
-                );
-                if (nonImminent.length > 0) {
-                  checkUsersBatch(nonImminent, true, false).catch(() => {});
-                }
-              }
+              triggerAllCriticalSweep().catch(() => {});
             },
             onError: err => handleWsDisconnect('ChainlinkWatcher', err)
           });
@@ -1841,6 +2137,7 @@ async function main() {
     );
   }
 
+  svrOraclePriceShiftLoop();
   ultraCriticalSniperLoop();
   criticalSniperLoop();
   generalRadarLoop();
