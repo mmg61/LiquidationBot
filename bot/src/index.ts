@@ -1246,8 +1246,19 @@ async function executeLiquidationStrike(
 }
 
 // ============================================================================
-// 6. KULLANICI SAĞLIK DEĞERLENDİRMESİ VE 3 KADEMELİ SINIFLANDIRMA
+// 6. KULLANICI SAĞLIK DEĞERLENDİRMESİ VE 3 KADEMELİ SINIFLANDIRMA (HİSTEREZİS KORUMALI)
 // ============================================================================
+const promotionAlertTimestamps = new Map<string, number>();
+
+function logThrottledPromotionAlert(key: string, message: string, minIntervalMs = 600000) {
+  const now = Date.now();
+  const last = promotionAlertTimestamps.get(key) || 0;
+  if (now - last >= minIntervalMs) {
+    promotionAlertTimestamps.set(key, now);
+    logAlert(message);
+  }
+}
+
 async function processUserAccountData(
   userAddress: `0x${string}`,
   data: readonly [bigint, bigint, bigint, bigint, bigint, bigint]
@@ -1271,6 +1282,16 @@ async function processUserAccountData(
     borrowerSnapshots.delete(userAddress);
   }
 
+  // Histerezis (Schmitt Trigger) Eşikleri: Sınırda (örn. 1.0450 veya 1.1195) dalgalanan cüzdanların
+  // sürekli kademeler arasında girip çıkarak log kirliliği yaratmasını ve hızlı radardan düşmesini önler.
+  const isCurrentlyImminent = imminentTargets.has(userAddress);
+  const isCurrentlyUltra = ultraCriticalTargets.has(userAddress);
+  const isCurrentlyCritical = criticalTargets.has(userAddress);
+
+  const imminentCap = isCurrentlyImminent ? 1.016 : 1.012;
+  const ultraCap = isCurrentlyUltra ? 1.052 : ULTRA_CRITICAL_HF_THRESHOLD; // 1.045 giriş, 1.052 çıkış
+  const criticalCap = isCurrentlyCritical ? 1.135 : CRITICAL_HF_THRESHOLD; // 1.120 giriş, 1.135 çıkış
+
   if (healthFactor > 0 && healthFactor < 1.0) {
     if (totalDebtUSD < MIN_DEBT_USD) {
       cooldowns.set(userAddress, now + 300000);
@@ -1285,23 +1306,25 @@ async function processUserAccountData(
     }
   } else if (
     healthFactor >= 1.0 &&
-    healthFactor < ULTRA_CRITICAL_HF_THRESHOLD &&
+    healthFactor < ultraCap &&
     totalDebtUSD >= MIN_DEBT_USD
   ) {
     criticalTargets.delete(userAddress);
-    if (healthFactor < 1.012) {
-      if (!imminentTargets.has(userAddress)) {
+    if (healthFactor < imminentCap) {
+      if (!isCurrentlyImminent) {
         imminentTargets.add(userAddress);
-        logAlert(
+        logThrottledPromotionAlert(
+          `imm_${userAddress}`,
           `IMMINENT LIQUIDATION TARGET (Private Sniper API + WSS Block Lock) | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`
         );
       }
     } else {
       imminentTargets.delete(userAddress);
     }
-    if (!ultraCriticalTargets.has(userAddress)) {
+    if (!isCurrentlyUltra) {
       ultraCriticalTargets.add(userAddress);
-      logAlert(
+      logThrottledPromotionAlert(
+        `ultra_${userAddress}`,
         `ULTRA-CRITICAL TARGET LOCKED (250ms Poll) | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`
       );
     }
@@ -1310,15 +1333,16 @@ async function processUserAccountData(
       getLiquidationCandidates(userAddress).catch(() => {});
     }
   } else if (
-    healthFactor >= ULTRA_CRITICAL_HF_THRESHOLD &&
-    healthFactor <= CRITICAL_HF_THRESHOLD &&
+    healthFactor >= ultraCap &&
+    healthFactor <= criticalCap &&
     totalDebtUSD >= MIN_DEBT_USD
   ) {
     imminentTargets.delete(userAddress);
     ultraCriticalTargets.delete(userAddress);
-    if (!criticalTargets.has(userAddress)) {
+    if (!isCurrentlyCritical) {
       criticalTargets.add(userAddress);
-      logAlert(
+      logThrottledPromotionAlert(
+        `crit_${userAddress}`,
         `HIGH RISK BORROWER PROMOTED TO SNIPER RADAR | ${userAddress} | HF: ${healthFactor.toFixed(4)} | Debt: $${totalDebtUSD.toFixed(2)}`
       );
     }
@@ -2074,7 +2098,7 @@ async function main() {
 
         const wsClient = createPublicClient({
           chain: arbitrum,
-          transport: webSocket(arbitrumWssUrl, { reconnect: true, keepAlive: true })
+          transport: webSocket(arbitrumWssUrl, { reconnect: false, keepAlive: true })
         });
         activeWsClient = wsClient;
 
@@ -2082,11 +2106,15 @@ async function main() {
           const shortMsg = (err?.shortMessage || err?.message || 'Socket closed').split('\n')[0];
           if (wsReconnecting) return;
           wsReconnecting = true;
-          logInfo(`WebSocket (${source}) connection recycled (${shortMsg}). Re-subscribing in 3s...`);
+          const isRateLimit = shortMsg.includes('429');
+          const delayMs = isRateLimit ? 15000 : 5000;
+          logInfo(
+            `WebSocket (${source}) connection recycled (${shortMsg}). Re-subscribing in ${delayMs / 1000}s...`
+          );
           setTimeout(() => {
             wsReconnecting = false;
             startRealtimeWebSocket();
-          }, 3000);
+          }, delayMs);
         };
 
         let lastWsSweep = 0;
